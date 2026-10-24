@@ -1202,39 +1202,61 @@ async fn conditional_delete_replay_conflicts_on_changed_expectations() {
         expected_resource_version: Some(1),
     };
     run(&state, authed_request(request.clone())).await.unwrap();
-    assert!(run(&state, authed_request(request.clone())).await.unwrap()
-        .metadata().contains_key("openshell-replayed"));
-    for (identity, version) in [(Some("new-id"), Some(1)), (None, None),
-        (Some("old-id"), Some(2))] {
+    assert!(
+        run(&state, authed_request(request.clone()))
+            .await
+            .unwrap()
+            .metadata()
+            .contains_key("openshell-replayed")
+    );
+    for (identity, version) in [
+        (Some("new-id"), Some(1)),
+        (None, None),
+        (Some("old-id"), Some(2)),
+    ] {
         let mut changed = request.clone();
         changed.expected_sandbox_id = identity.map(str::to_owned);
         changed.expected_resource_version = version;
-        assert_eq!(reason(&run(&state, authed_request(changed)).await.unwrap_err()),
-            "REQUEST_ID_PAYLOAD_MISMATCH");
+        assert_eq!(
+            reason(&run(&state, authed_request(changed)).await.unwrap_err()),
+            "REQUEST_ID_PAYLOAD_MISMATCH"
+        );
     }
 }
 
 #[tokio::test]
 async fn conditional_stop_replays_lost_response_but_conflicts_on_changed_expectations() {
     let (_directory, state) = protected_state().await;
-    let mut sandbox = Sandbox { metadata: Some(meta("stopped")), ..Default::default() };
+    let mut sandbox = Sandbox {
+        metadata: Some(meta("stopped")),
+        ..Default::default()
+    };
     sandbox.set_phase(SandboxPhase::Stopped as i32);
     let target_id = sandbox.object_id().to_string();
     state.store.put_message(&sandbox).await.unwrap();
     let request = StopSandboxRequest {
         workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
-        name: "stopped".into(), request_id: id(),
-        expected_sandbox_id: Some(target_id), expected_resource_version: None,
+        name: "stopped".into(),
+        request_id: id(),
+        expected_sandbox_id: Some(target_id),
+        expected_resource_version: None,
     };
     // Discard the first response, as a disconnected client might do.
     run(&state, authed_request(request.clone())).await.unwrap();
-    assert!(run(&state, authed_request(request.clone())).await.unwrap()
-        .metadata().contains_key("openshell-replayed"));
+    assert!(
+        run(&state, authed_request(request.clone()))
+            .await
+            .unwrap()
+            .metadata()
+            .contains_key("openshell-replayed")
+    );
     for (identity, version) in [(Some("different-id"), None), (None, None), (Some(""), None)] {
         let mut changed = request.clone();
         changed.expected_sandbox_id = identity.map(str::to_owned);
         changed.expected_resource_version = version;
-        assert_eq!(reason(&run(&state, authed_request(changed)).await.unwrap_err()),
-            "REQUEST_ID_PAYLOAD_MISMATCH");
+        assert_eq!(
+            reason(&run(&state, authed_request(changed)).await.unwrap_err()),
+            "REQUEST_ID_PAYLOAD_MISMATCH"
+        );
     }
 }

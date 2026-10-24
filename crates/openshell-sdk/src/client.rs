@@ -15,9 +15,9 @@ use crate::pagination::{Page, Pager};
 use crate::raw::AuthedGrpcClient;
 use crate::refresh::{RefreshedToken, TokenSource};
 use crate::types::{
-    ConditionalSandboxMutation, DeleteOptions, DeletionResult, ExecOptions, ExecResult, Health, ListOptions, SandboxPhase,
-    SandboxRef, SandboxSpec, SandboxTemplateCreateSpec, SandboxTemplateListOptions,
-    SandboxWorkloadTemplate, WorkspaceRef,
+    ConditionalSandboxMutation, DeleteOptions, DeletionResult, ExecOptions, ExecResult, Health,
+    ListOptions, SandboxPhase, SandboxRef, SandboxSpec, SandboxTemplateCreateSpec,
+    SandboxTemplateListOptions, SandboxWorkloadTemplate, WorkspaceRef,
 };
 use crate::{WatchEvent, WatchOptions, transport};
 use futures::{Stream, StreamExt};
@@ -375,16 +375,25 @@ impl OpenShellClient {
 
     /// Conditional default-workspace deletion; refuses unsupported gateways.
     pub async fn delete_sandbox_conditional(
-        &self, name: &str, opts: DeleteOptions, condition: ConditionalSandboxMutation,
+        &self,
+        name: &str,
+        opts: DeleteOptions,
+        condition: ConditionalSandboxMutation,
     ) -> Result<DeletionResult> {
-        self.workspace("default").delete_sandbox_conditional(name, opts, condition).await
+        self.workspace("default")
+            .delete_sandbox_conditional(name, opts, condition)
+            .await
     }
 
     /// Conditional default-workspace stop; refuses unsupported gateways.
     pub async fn stop_sandbox_conditional(
-        &self, name: &str, condition: ConditionalSandboxMutation,
+        &self,
+        name: &str,
+        condition: ConditionalSandboxMutation,
     ) -> Result<SandboxRef> {
-        self.workspace("default").stop_sandbox_conditional(name, condition).await
+        self.workspace("default")
+            .stop_sandbox_conditional(name, condition)
+            .await
     }
 
     /// Stop a sandbox by name.
@@ -1110,7 +1119,10 @@ impl WorkspaceScopedClient {
     /// Delete only the recorded immutable identity/version, never a replacement.
     /// Capability proof is fetched for each call. No unguarded fallback is sent.
     pub async fn delete_sandbox_conditional(
-        &self, name: &str, opts: DeleteOptions, condition: ConditionalSandboxMutation,
+        &self,
+        name: &str,
+        opts: DeleteOptions,
+        condition: ConditionalSandboxMutation,
     ) -> Result<DeletionResult> {
         condition.validate()?;
         self.require_conditional_mutations().await?;
@@ -1122,10 +1134,13 @@ impl WorkspaceScopedClient {
             expected_sandbox_id: Some(condition.expected_sandbox_id),
             expected_resource_version: condition.expected_resource_version,
         };
-        let response = self.client.unary(|mut grpc| {
-            let request = request.clone();
-            async move { grpc.delete_sandbox(request).await }
-        }).await?;
+        let response = self
+            .client
+            .unary(|mut grpc| {
+                let request = request.clone();
+                async move { grpc.delete_sandbox(request).await }
+            })
+            .await?;
         Ok(DeletionResult {
             outcome: response.outcome.into(),
             sandbox_id: (!response.sandbox_id.is_empty()).then_some(response.sandbox_id),
@@ -1134,7 +1149,9 @@ impl WorkspaceScopedClient {
 
     /// Stop only the recorded immutable identity/version, never a replacement.
     pub async fn stop_sandbox_conditional(
-        &self, name: &str, condition: ConditionalSandboxMutation,
+        &self,
+        name: &str,
+        condition: ConditionalSandboxMutation,
     ) -> Result<SandboxRef> {
         condition.validate()?;
         self.require_conditional_mutations().await?;
@@ -1145,18 +1162,26 @@ impl WorkspaceScopedClient {
             expected_sandbox_id: Some(condition.expected_sandbox_id),
             expected_resource_version: condition.expected_resource_version,
         };
-        let response = self.client.unary(|mut grpc| {
-            let request = request.clone();
-            async move { grpc.stop_sandbox(request).await }
-        }).await?;
+        let response = self
+            .client
+            .unary(|mut grpc| {
+                let request = request.clone();
+                async move { grpc.stop_sandbox(request).await }
+            })
+            .await?;
         sandbox_from_response(response.sandbox)
     }
 
     async fn require_conditional_mutations(&self) -> Result<()> {
         let health = self.client.health().await?;
-        if !health.capabilities.iter().any(|value| value == "sandbox-mutation-preconditions-v1") {
+        if !health
+            .capabilities
+            .iter()
+            .any(|value| value == "sandbox-mutation-preconditions-v1")
+        {
             return Err(SdkError::invalid_config(
-                "gateway does not advertise sandbox-mutation-preconditions-v1; conditional mutation refused"));
+                "gateway does not advertise sandbox-mutation-preconditions-v1; conditional mutation refused",
+            ));
         }
         Ok(())
     }

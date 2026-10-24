@@ -1777,14 +1777,17 @@ async fn handle_stop_sandbox_inner(
     .await?;
     let workspace = resolved.object_workspace();
     let name = resolved.object_name();
-    let sandbox = state.compute.stop_sandbox_with_preconditions(
-        workspace,
-        name,
-        SandboxDeletePreconditions {
-            expected_sandbox_id: req.expected_sandbox_id,
-            expected_resource_version: req.expected_resource_version,
-        },
-    ).await?;
+    let sandbox = state
+        .compute
+        .stop_sandbox_with_preconditions(
+            workspace,
+            name,
+            SandboxDeletePreconditions {
+                expected_sandbox_id: req.expected_sandbox_id,
+                expected_resource_version: req.expected_resource_version,
+            },
+        )
+        .await?;
     info!(sandbox_name = %name, "StopSandbox request completed successfully");
     Ok(Response::new(SandboxResponse {
         sandbox: Some(sandbox),

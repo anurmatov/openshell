@@ -320,23 +320,40 @@ pub struct SandboxDeletePreconditions {
 impl SandboxDeletePreconditions {
     fn validate(&self) -> Result<(), Status> {
         if self.expected_sandbox_id.as_deref() == Some("") {
-            return Err(Status::invalid_argument("expected_sandbox_id must not be empty"));
+            return Err(Status::invalid_argument(
+                "expected_sandbox_id must not be empty",
+            ));
         }
         if self.expected_resource_version == Some(0) {
-            return Err(Status::invalid_argument("expected_resource_version must be nonzero"));
+            return Err(Status::invalid_argument(
+                "expected_resource_version must be nonzero",
+            ));
         }
         if self.expected_resource_version.is_some() && self.expected_sandbox_id.is_none() {
-            return Err(Status::invalid_argument("expected_resource_version requires expected_sandbox_id"));
+            return Err(Status::invalid_argument(
+                "expected_resource_version requires expected_sandbox_id",
+            ));
         }
         Ok(())
     }
 
     fn check(&self, current: &Sandbox) -> Result<(), Status> {
-        if self.expected_sandbox_id.as_deref().is_some_and(|expected| expected != current.object_id()) {
-            return Err(Status::aborted("sandbox identity does not match expected_sandbox_id"));
+        if self
+            .expected_sandbox_id
+            .as_deref()
+            .is_some_and(|expected| expected != current.object_id())
+        {
+            return Err(Status::aborted(
+                "sandbox identity does not match expected_sandbox_id",
+            ));
         }
-        if self.expected_resource_version.is_some_and(|expected| expected != sandbox_resource_version(current)) {
-            return Err(Status::aborted("sandbox resource version does not match expected_resource_version"));
+        if self
+            .expected_resource_version
+            .is_some_and(|expected| expected != sandbox_resource_version(current))
+        {
+            return Err(Status::aborted(
+                "sandbox resource version does not match expected_resource_version",
+            ));
         }
         Ok(())
     }
@@ -1835,7 +1852,8 @@ impl ComputeRuntime {
         workspace: &str,
         name: &str,
     ) -> Result<Sandbox, Status> {
-        self.stop_sandbox_with_preconditions(workspace, name, SandboxDeletePreconditions::default()).await
+        self.stop_sandbox_with_preconditions(workspace, name, SandboxDeletePreconditions::default())
+            .await
     }
 
     pub(crate) async fn stop_sandbox_with_preconditions(
@@ -2932,7 +2950,12 @@ impl ComputeRuntime {
         // `Deleting` row used to fence recovery, and the prior row used only
         // for exact-version rollback after an ambiguous driver failure.
         let transition = match self
-            .begin_conditional_sandbox_delete(&target.sandbox_id, Some(current), None, &preconditions)
+            .begin_conditional_sandbox_delete(
+                &target.sandbox_id,
+                Some(current),
+                None,
+                &preconditions,
+            )
             .await?
         {
             BeginDelete::AlreadyDeleting => {
@@ -3013,8 +3036,13 @@ impl ComputeRuntime {
         initial_snapshot: Option<Sandbox>,
         failed_create: Option<&Sandbox>,
     ) -> Result<BeginDelete, Status> {
-        self.begin_conditional_sandbox_delete(sandbox_id, initial_snapshot, failed_create,
-            &SandboxDeletePreconditions::default()).await
+        self.begin_conditional_sandbox_delete(
+            sandbox_id,
+            initial_snapshot,
+            failed_create,
+            &SandboxDeletePreconditions::default(),
+        )
+        .await
     }
 
     async fn begin_conditional_sandbox_delete(
@@ -13982,13 +14010,19 @@ mod tests {
             let delete_gate = runtime.lifecycle_gates.gate_for(original.object_id());
             let delete_guard = delete_gate.lock().await;
             let delete_runtime = runtime.clone();
-            let delete =
-                tokio::spawn(
-                    async move { delete_runtime.delete_sandbox_allow_missing_with_preconditions(
-                        "default", "sandbox-a", false, SandboxDeletePreconditions {
-                            expected_sandbox_id, expected_resource_version: None,
-                        }).await },
-                );
+            let delete = tokio::spawn(async move {
+                delete_runtime
+                    .delete_sandbox_allow_missing_with_preconditions(
+                        "default",
+                        "sandbox-a",
+                        false,
+                        SandboxDeletePreconditions {
+                            expected_sandbox_id,
+                            expected_resource_version: None,
+                        },
+                    )
+                    .await
+            });
             tokio::time::timeout(Duration::from_secs(1), async {
                 while Arc::strong_count(&delete_gate) < 2 {
                     tokio::task::yield_now().await;
@@ -14122,15 +14156,38 @@ mod tests {
         let runtime = test_runtime(driver.clone()).await;
         let sandbox = sandbox_record("cas-id", "cas-target", SandboxPhase::Ready);
         runtime.store.put_message(&sandbox).await.unwrap();
-        let stale = runtime.store.get_message::<Sandbox>("cas-id").await.unwrap().unwrap();
+        let stale = runtime
+            .store
+            .get_message::<Sandbox>("cas-id")
+            .await
+            .unwrap()
+            .unwrap();
         let version = sandbox_resource_version(&stale);
-        runtime.store.update_message_cas::<Sandbox, _>("cas-id", version,
-            |sandbox| sandbox.set_current_policy_version(8)).await.unwrap();
-        let result = runtime.begin_conditional_sandbox_delete("cas-id", Some(stale), None,
-            &SandboxDeletePreconditions { expected_sandbox_id: Some("cas-id".into()),
-                expected_resource_version: Some(version) }).await;
+        runtime
+            .store
+            .update_message_cas::<Sandbox, _>("cas-id", version, |sandbox| {
+                sandbox.set_current_policy_version(8)
+            })
+            .await
+            .unwrap();
+        let result = runtime
+            .begin_conditional_sandbox_delete(
+                "cas-id",
+                Some(stale),
+                None,
+                &SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("cas-id".into()),
+                    expected_resource_version: Some(version),
+                },
+            )
+            .await;
         assert!(matches!(result, Err(ref error) if error.code() == Code::Aborted));
-        let retained = runtime.store.get_message::<Sandbox>("cas-id").await.unwrap().unwrap();
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("cas-id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
         assert_eq!(retained.current_policy_version(), 8);
         assert_eq!(driver.delete_calls(), 0);
@@ -14146,19 +14203,47 @@ mod tests {
         let held = gate.lock().await;
         let worker = runtime.clone();
         let request = tokio::spawn(async move {
-            worker.stop_sandbox_with_preconditions("default", "reusable",
-                SandboxDeletePreconditions { expected_sandbox_id: Some("retiring-id".into()),
-                    expected_resource_version: None }).await
+            worker
+                .stop_sandbox_with_preconditions(
+                    "default",
+                    "reusable",
+                    SandboxDeletePreconditions {
+                        expected_sandbox_id: Some("retiring-id".into()),
+                        expected_resource_version: None,
+                    },
+                )
+                .await
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while Arc::strong_count(&gate) < 2 { tokio::task::yield_now().await; }
-        }).await.expect("stop has resolved the old immutable ID");
-        runtime.store.delete(Sandbox::object_type(), "retiring-id").await.unwrap();
-        runtime.store.put_message(&sandbox_record("replacement-id", "reusable", SandboxPhase::Ready)).await.unwrap();
+            while Arc::strong_count(&gate) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop has resolved the old immutable ID");
+        runtime
+            .store
+            .delete(Sandbox::object_type(), "retiring-id")
+            .await
+            .unwrap();
+        runtime
+            .store
+            .put_message(&sandbox_record(
+                "replacement-id",
+                "reusable",
+                SandboxPhase::Ready,
+            ))
+            .await
+            .unwrap();
         drop(held);
         assert_eq!(request.await.unwrap().unwrap_err().code(), Code::NotFound);
         assert_eq!(driver.stop_calls(), 0);
-        let retained = runtime.store.get_message::<Sandbox>("replacement-id").await.unwrap().unwrap();
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("replacement-id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
     }
 
@@ -14168,25 +14253,51 @@ mod tests {
         let runtime = test_runtime(driver.clone()).await;
         let sandbox = sandbox_record("stop-id", "conditional", SandboxPhase::Ready);
         runtime.store.put_message(&sandbox).await.unwrap();
-        let current = runtime.store.get_message::<Sandbox>("stop-id").await.unwrap().unwrap();
+        let current = runtime
+            .store
+            .get_message::<Sandbox>("stop-id")
+            .await
+            .unwrap()
+            .unwrap();
         let version = sandbox_resource_version(&current);
         let gate = runtime.lifecycle_gates.gate_for("stop-id");
         let held = gate.lock().await;
         let worker = runtime.clone();
         let request = tokio::spawn(async move {
-            worker.stop_sandbox_with_preconditions("default", "conditional",
-                SandboxDeletePreconditions { expected_sandbox_id: Some("stop-id".into()),
-                    expected_resource_version: Some(version) }).await
+            worker
+                .stop_sandbox_with_preconditions(
+                    "default",
+                    "conditional",
+                    SandboxDeletePreconditions {
+                        expected_sandbox_id: Some("stop-id".into()),
+                        expected_resource_version: Some(version),
+                    },
+                )
+                .await
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while Arc::strong_count(&gate) < 2 { tokio::task::yield_now().await; }
-        }).await.expect("stop waits on the resolved immutable ID gate");
-        runtime.store.update_message_cas::<Sandbox, _>("stop-id", version,
-            |sandbox| sandbox.set_current_policy_version(9)).await.unwrap();
+            while Arc::strong_count(&gate) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop waits on the resolved immutable ID gate");
+        runtime
+            .store
+            .update_message_cas::<Sandbox, _>("stop-id", version, |sandbox| {
+                sandbox.set_current_policy_version(9)
+            })
+            .await
+            .unwrap();
         drop(held);
         assert_eq!(request.await.unwrap().unwrap_err().code(), Code::Aborted);
         assert_eq!(driver.stop_calls(), 0);
-        let retained = runtime.store.get_message::<Sandbox>("stop-id").await.unwrap().unwrap();
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("stop-id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
         assert_eq!(retained.current_policy_version(), 9);
     }
@@ -14197,15 +14308,36 @@ mod tests {
         let runtime = test_runtime(driver.clone()).await;
         let sandbox = sandbox_record("fresh-id", "reused", SandboxPhase::Ready);
         runtime.store.put_message(&sandbox).await.unwrap();
-        let error = runtime.stop_sandbox_with_preconditions("default", "reused",
-            SandboxDeletePreconditions { expected_sandbox_id: Some("retired-id".into()),
-                expected_resource_version: None }).await.unwrap_err();
+        let error = runtime
+            .stop_sandbox_with_preconditions(
+                "default",
+                "reused",
+                SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("retired-id".into()),
+                    expected_resource_version: None,
+                },
+            )
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), Code::Aborted);
         assert_eq!(driver.stop_calls(), 0);
-        let current = runtime.store.get_message::<Sandbox>("fresh-id").await.unwrap().unwrap();
-        let stopped = runtime.stop_sandbox_with_preconditions("default", "reused",
-            SandboxDeletePreconditions { expected_sandbox_id: Some("fresh-id".into()),
-                expected_resource_version: Some(sandbox_resource_version(&current)) }).await.unwrap();
+        let current = runtime
+            .store
+            .get_message::<Sandbox>("fresh-id")
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = runtime
+            .stop_sandbox_with_preconditions(
+                "default",
+                "reused",
+                SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("fresh-id".into()),
+                    expected_resource_version: Some(sandbox_resource_version(&current)),
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(stopped.object_id(), "fresh-id");
         assert_eq!(driver.stop_calls(), 1);
     }

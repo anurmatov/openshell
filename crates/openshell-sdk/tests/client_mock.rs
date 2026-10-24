@@ -2432,12 +2432,28 @@ fn conditional_request() -> openshell_sdk::ConditionalSandboxMutation {
 #[tokio::test]
 async fn conditional_mutations_refuse_missing_or_unknown_capability_without_sending() {
     for capabilities in [vec![], vec!["sandbox-mutation-preconditions-v2".into()]] {
-        let state = Arc::new(MockState { capabilities, ..Default::default() });
+        let state = Arc::new(MockState {
+            capabilities,
+            ..Default::default()
+        });
         let endpoint = start_mock(state.clone()).await;
         let client = connect(&endpoint).await;
-        assert!(client.stop_sandbox_conditional("target", conditional_request()).await.is_err());
-        assert!(client.delete_sandbox_conditional("target", openshell_sdk::DeleteOptions::default(),
-            conditional_request()).await.is_err());
+        assert!(
+            client
+                .stop_sandbox_conditional("target", conditional_request())
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .delete_sandbox_conditional(
+                    "target",
+                    openshell_sdk::DeleteOptions::default(),
+                    conditional_request()
+                )
+                .await
+                .is_err()
+        );
         assert_eq!(state.stop_calls.load(Ordering::SeqCst), 0);
         assert_eq!(state.delete_calls.load(Ordering::SeqCst), 0);
         assert!(state.last_stop.lock().await.is_none());
@@ -2453,9 +2469,18 @@ async fn conditional_mutations_send_exact_preconditions_and_workspace_after_capa
     });
     let endpoint = start_mock(state.clone()).await;
     let client = connect(&endpoint).await.workspace("test-workspace");
-    client.stop_sandbox_conditional("target", conditional_request()).await.unwrap();
-    client.delete_sandbox_conditional("target", openshell_sdk::DeleteOptions::default(),
-        conditional_request()).await.unwrap();
+    client
+        .stop_sandbox_conditional("target", conditional_request())
+        .await
+        .unwrap();
+    client
+        .delete_sandbox_conditional(
+            "target",
+            openshell_sdk::DeleteOptions::default(),
+            conditional_request(),
+        )
+        .await
+        .unwrap();
     let stop = state.last_stop.lock().await.clone().unwrap();
     let delete = state.last_delete.lock().await.clone().unwrap();
     assert_eq!(stop.expected_sandbox_id.as_deref(), Some("recorded-id"));
@@ -2464,8 +2489,14 @@ async fn conditional_mutations_send_exact_preconditions_and_workspace_after_capa
     assert_eq!(delete.expected_resource_version, Some(7));
     assert_eq!(stop.request_id, conditional_request().request_id);
     assert_eq!(delete.request_id, stop.request_id);
-    assert_eq!(selected_workspace(&stop.workspace_scope), Some("test-workspace"));
-    assert_eq!(selected_workspace(&delete.workspace_scope), Some("test-workspace"));
+    assert_eq!(
+        selected_workspace(&stop.workspace_scope),
+        Some("test-workspace")
+    );
+    assert_eq!(
+        selected_workspace(&delete.workspace_scope),
+        Some("test-workspace")
+    );
     assert_eq!(state.stop_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.delete_calls.load(Ordering::SeqCst), 1);
 }

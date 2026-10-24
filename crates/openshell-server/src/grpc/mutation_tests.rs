@@ -264,23 +264,47 @@ async fn repeated_revocation_completes_without_another_write() {
 #[tokio::test]
 async fn conditional_sandbox_requests_reject_explicit_empty_zero_and_version_without_id() {
     let state = test_server_state().await;
-    state.store.put_message(&Sandbox { metadata: Some(metadata("conditional")),
-        ..Default::default() }).await.unwrap();
-    for (identity, version) in [(Some(""), None), (Some("conditional"), Some(0)), (None, Some(1))] {
+    state
+        .store
+        .put_message(&Sandbox {
+            metadata: Some(metadata("conditional")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (identity, version) in [
+        (Some(""), None),
+        (Some("conditional"), Some(0)),
+        (None, Some(1)),
+    ] {
         let scope = Some(openshell_core::proto::workspace_selector("default"));
         let stop = openshell_core::proto::StopSandboxRequest {
-            workspace_scope: scope.clone(), name: "conditional".into(),
-            expected_sandbox_id: identity.map(str::to_owned), expected_resource_version: version,
+            workspace_scope: scope.clone(),
+            name: "conditional".into(),
+            expected_sandbox_id: identity.map(str::to_owned),
+            expected_resource_version: version,
             ..Default::default()
         };
-        assert_eq!(sandbox::handle_stop_sandbox(&state, authed_request(stop)).await.unwrap_err().code(),
-            Code::InvalidArgument);
+        assert_eq!(
+            sandbox::handle_stop_sandbox(&state, authed_request(stop))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
         let delete = DeleteSandboxRequest {
-            workspace_scope: scope, name: "conditional".into(),
-            expected_sandbox_id: identity.map(str::to_owned), expected_resource_version: version,
+            workspace_scope: scope,
+            name: "conditional".into(),
+            expected_sandbox_id: identity.map(str::to_owned),
+            expected_resource_version: version,
             ..Default::default()
         };
-        assert_eq!(sandbox::handle_delete_sandbox(&state, authed_request(delete)).await.unwrap_err().code(),
-            Code::InvalidArgument);
+        assert_eq!(
+            sandbox::handle_delete_sandbox(&state, authed_request(delete))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
     }
 }

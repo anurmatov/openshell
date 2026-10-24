@@ -35,10 +35,13 @@ pub struct ConditionalSandboxMutation {
 
 impl ConditionalSandboxMutation {
     pub(crate) fn validate(&self) -> crate::error::Result<()> {
-        if self.expected_sandbox_id.is_empty() || self.expected_resource_version == Some(0)
-            || self.request_id.is_empty() {
+        if self.expected_sandbox_id.is_empty()
+            || self.expected_resource_version == Some(0)
+            || self.request_id.is_empty()
+        {
             return Err(crate::SdkError::invalid_config(
-                "conditional mutation requires an ID, a nonzero version when supplied, and a stable request_id"));
+                "conditional mutation requires an ID, a nonzero version when supplied, and a stable request_id",
+            ));
         }
         Ok(())
     }
