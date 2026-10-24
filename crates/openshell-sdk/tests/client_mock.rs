@@ -47,6 +47,8 @@ fn selects_all_workspaces(scope: &Option<proto::datamodel::v1::WorkspaceSelector
 #[derive(Default)]
 struct MockState {
     capabilities: Vec<String>,
+    stop_calls: AtomicU32,
+    delete_calls: AtomicU32,
     last_delete: Mutex<Option<proto::DeleteSandboxRequest>>,
     last_get_name: Mutex<Option<String>>,
     last_get_workspace: Mutex<Option<String>>,
@@ -425,6 +427,7 @@ impl OpenShell for TestOpenShell {
         &self,
         request: tonic::Request<proto::StopSandboxRequest>,
     ) -> Result<Response<proto::SandboxResponse>, Status> {
+        self.state.stop_calls.fetch_add(1, Ordering::SeqCst);
         let request = request.into_inner();
         let sandbox = sandbox_with_phase_ws(
             request.name.as_str(),
@@ -562,6 +565,7 @@ impl OpenShell for TestOpenShell {
         &self,
         request: tonic::Request<proto::DeleteSandboxRequest>,
     ) -> Result<Response<proto::DeleteSandboxResponse>, Status> {
+        self.state.delete_calls.fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
         *self.state.last_delete.lock().await = Some(req.clone());
         *self.state.last_delete_name.lock().await = Some(req.name.clone());
@@ -2434,6 +2438,8 @@ async fn conditional_mutations_refuse_missing_or_unknown_capability_without_send
         assert!(client.stop_sandbox_conditional("target", conditional_request()).await.is_err());
         assert!(client.delete_sandbox_conditional("target", openshell_sdk::DeleteOptions::default(),
             conditional_request()).await.is_err());
+        assert_eq!(state.stop_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.delete_calls.load(Ordering::SeqCst), 0);
         assert!(state.last_stop.lock().await.is_none());
         assert!(state.last_delete.lock().await.is_none());
     }
@@ -2460,4 +2466,6 @@ async fn conditional_mutations_send_exact_preconditions_and_workspace_after_capa
     assert_eq!(delete.request_id, stop.request_id);
     assert_eq!(selected_workspace(&stop.workspace_scope), Some("test-workspace"));
     assert_eq!(selected_workspace(&delete.workspace_scope), Some("test-workspace"));
+    assert_eq!(state.stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.delete_calls.load(Ordering::SeqCst), 1);
 }

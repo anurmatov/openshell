@@ -45,8 +45,8 @@ pub(in crate::grpc::mutation_replay) async fn exercise_protected_backend(url: &s
     configure_key(&mut first, &directory);
     configure_key(&mut second, &directory);
     let req = DeleteSandboxRequest {
-        expected_sandbox_id: Some("retired-id".into()),
-        expected_resource_version: Some(1),
+        expected_sandbox_id: None,
+        expected_resource_version: None,
         name: "keyed-restart".into(),
         workspace_scope: Some(openshell_core::proto::workspace_selector(
             "default".to_string(),
