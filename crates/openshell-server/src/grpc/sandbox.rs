@@ -1721,10 +1721,10 @@ async fn handle_delete_sandbox_inner(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .name;
-    // Main's canonical public delete request contains no caller-provided
-    // identity/version fields. The compute layer still binds the resolved
-    // object ID and lifecycle guards before committing deletion.
-    let preconditions = SandboxDeletePreconditions::default();
+    let preconditions = SandboxDeletePreconditions {
+        expected_sandbox_id: req.expected_sandbox_id,
+        expected_resource_version: req.expected_resource_version,
+    };
     let result = state
         .compute
         .delete_sandbox_allow_missing_with_preconditions(
@@ -1777,7 +1777,14 @@ async fn handle_stop_sandbox_inner(
     .await?;
     let workspace = resolved.object_workspace();
     let name = resolved.object_name();
-    let sandbox = state.compute.stop_sandbox(workspace, name).await?;
+    let sandbox = state.compute.stop_sandbox_with_preconditions(
+        workspace,
+        name,
+        SandboxDeletePreconditions {
+            expected_sandbox_id: req.expected_sandbox_id,
+            expected_resource_version: req.expected_resource_version,
+        },
+    ).await?;
     info!(sandbox_name = %name, "StopSandbox request completed successfully");
     Ok(Response::new(SandboxResponse {
         sandbox: Some(sandbox),
@@ -6053,6 +6060,8 @@ mod tests {
             handle_delete_sandbox_inner(
                 &delete_state,
                 authed_request(DeleteSandboxRequest {
+                    expected_sandbox_id: None,
+                    expected_resource_version: None,
                     request_id: String::new(),
                     allow_missing: false,
                     name: "reused-name".to_string(),
@@ -10161,6 +10170,8 @@ mod tests {
         let err = handle_delete_sandbox(
             &state,
             non_member_request(DeleteSandboxRequest {
+                expected_sandbox_id: Some("stale-id".into()),
+                expected_resource_version: Some(999),
                 request_id: String::new(),
                 allow_missing: false,
                 name: ("any").to_string(),
@@ -10181,6 +10192,8 @@ mod tests {
             handle_stop_sandbox(
                 &state,
                 non_member_request(StopSandboxRequest {
+                    expected_sandbox_id: Some("stale-id".into()),
+                    expected_resource_version: Some(999),
                     request_id: String::new(),
                     name: ("any").to_string(),
                     workspace_scope: Some(openshell_core::proto::workspace_selector(

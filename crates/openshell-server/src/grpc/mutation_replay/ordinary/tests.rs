@@ -45,6 +45,8 @@ pub(in crate::grpc::mutation_replay) async fn exercise_protected_backend(url: &s
     configure_key(&mut first, &directory);
     configure_key(&mut second, &directory);
     let req = DeleteSandboxRequest {
+        expected_sandbox_id: Some("retired-id".into()),
+        expected_resource_version: Some(1),
         name: "keyed-restart".into(),
         workspace_scope: Some(openshell_core::proto::workspace_selector(
             "default".to_string(),
@@ -219,6 +221,8 @@ async fn durable_sandbox_mutations_hide_unauthorized_workspaces() {
         let status = run(
             &state,
             non_member_request(DeleteSandboxRequest {
+                expected_sandbox_id: None,
+                expected_resource_version: None,
                 name: "hidden".into(),
                 workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
                 allow_missing: false,
@@ -326,6 +330,8 @@ async fn sandbox_replay_survives_status_churn_but_never_selects_replacement() {
 async fn keyed_fingerprints_fail_closed_on_missing_or_rotated_keys() {
     let missing = test_server_state().await;
     let req = DeleteSandboxRequest {
+        expected_sandbox_id: None,
+        expected_resource_version: None,
         name: "missing".into(),
         workspace_scope: Some(openshell_core::proto::workspace_selector(
             "default".to_string(),
@@ -375,6 +381,8 @@ async fn keyed_fingerprints_fail_closed_on_missing_or_rotated_keys() {
 async fn original_payload_is_identity_and_current_transformation_is_a_replay_guard() {
     let (_directory, state) = protected_state().await;
     let original = DeleteSandboxRequest {
+        expected_sandbox_id: None,
+        expected_resource_version: None,
         name: "original".into(),
         workspace_scope: Some(openshell_core::proto::workspace_selector(
             "default".to_string(),
@@ -1154,4 +1162,79 @@ async fn draft_receipts_replay_after_chunk_state_and_review_tokens_change() {
         .into_inner();
     assert_eq!(approved.chunks_approved, 1);
     assert_eq!(Box::pin(replay(&state, all)).await, approved);
+}
+
+#[test]
+fn conditional_mutation_fingerprints_preserve_presence_and_values() {
+    let delete = DeleteSandboxRequest::default();
+    let stop = StopSandboxRequest::default();
+    macro_rules! check {
+        ($base:expr) => {{
+            let base = $base;
+            let mut hashes = std::collections::HashSet::new();
+            assert!(hashes.insert(fingerprint(&base).unwrap()));
+            for id in ["", "old-id", "new-id"] {
+                let mut request = base.clone();
+                request.expected_sandbox_id = Some(id.into());
+                assert!(hashes.insert(fingerprint(&request).unwrap()));
+            }
+            for version in [0, 1, 2] {
+                let mut request = base.clone();
+                request.expected_sandbox_id = Some("old-id".into());
+                request.expected_resource_version = Some(version);
+                assert!(hashes.insert(fingerprint(&request).unwrap()));
+            }
+        }};
+    }
+    check!(delete);
+    check!(stop);
+}
+
+#[tokio::test]
+async fn conditional_delete_replay_conflicts_on_changed_expectations() {
+    let (_directory, state) = protected_state().await;
+    let request = DeleteSandboxRequest {
+        workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+        name: "gone".into(),
+        allow_missing: true,
+        request_id: id(),
+        expected_sandbox_id: Some("old-id".into()),
+        expected_resource_version: Some(1),
+    };
+    run(&state, authed_request(request.clone())).await.unwrap();
+    assert!(run(&state, authed_request(request.clone())).await.unwrap()
+        .metadata().contains_key("openshell-replayed"));
+    for (identity, version) in [(Some("new-id"), Some(1)), (None, None),
+        (Some("old-id"), Some(2))] {
+        let mut changed = request.clone();
+        changed.expected_sandbox_id = identity.map(str::to_owned);
+        changed.expected_resource_version = version;
+        assert_eq!(reason(&run(&state, authed_request(changed)).await.unwrap_err()),
+            "REQUEST_ID_PAYLOAD_MISMATCH");
+    }
+}
+
+#[tokio::test]
+async fn conditional_stop_replays_lost_response_but_conflicts_on_changed_expectations() {
+    let (_directory, state) = protected_state().await;
+    let mut sandbox = Sandbox { metadata: Some(meta("stopped")), ..Default::default() };
+    sandbox.set_phase(SandboxPhase::Stopped as i32);
+    let target_id = sandbox.object_id().to_string();
+    state.store.put_message(&sandbox).await.unwrap();
+    let request = StopSandboxRequest {
+        workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+        name: "stopped".into(), request_id: id(),
+        expected_sandbox_id: Some(target_id), expected_resource_version: None,
+    };
+    // Discard the first response, as a disconnected client might do.
+    run(&state, authed_request(request.clone())).await.unwrap();
+    assert!(run(&state, authed_request(request.clone())).await.unwrap()
+        .metadata().contains_key("openshell-replayed"));
+    for (identity, version) in [(Some("different-id"), None), (None, None), (Some(""), None)] {
+        let mut changed = request.clone();
+        changed.expected_sandbox_id = identity.map(str::to_owned);
+        changed.expected_resource_version = version;
+        assert_eq!(reason(&run(&state, authed_request(changed)).await.unwrap_err()),
+            "REQUEST_ID_PAYLOAD_MISMATCH");
+    }
 }

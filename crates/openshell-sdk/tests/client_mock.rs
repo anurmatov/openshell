@@ -46,6 +46,8 @@ fn selects_all_workspaces(scope: &Option<proto::datamodel::v1::WorkspaceSelector
 /// returned. One per test so assertions are scoped.
 #[derive(Default)]
 struct MockState {
+    capabilities: Vec<String>,
+    last_delete: Mutex<Option<proto::DeleteSandboxRequest>>,
     last_get_name: Mutex<Option<String>>,
     last_get_workspace: Mutex<Option<String>>,
     last_create: Mutex<Option<proto::CreateSandboxRequest>>,
@@ -314,6 +316,7 @@ impl OpenShell for TestOpenShell {
         Ok(Response::new(proto::HealthResponse {
             status: proto::ServiceStatus::Healthy.into(),
             version: "test-1.2.3".to_string(),
+            capabilities: self.state.capabilities.clone(),
         }))
     }
 
@@ -560,6 +563,7 @@ impl OpenShell for TestOpenShell {
         request: tonic::Request<proto::DeleteSandboxRequest>,
     ) -> Result<Response<proto::DeleteSandboxResponse>, Status> {
         let req = request.into_inner();
+        *self.state.last_delete.lock().await = Some(req.clone());
         *self.state.last_delete_name.lock().await = Some(req.name.clone());
         *self.state.last_delete_workspace.lock().await =
             selected_workspace(&req.workspace_scope).map(ToString::to_string);
@@ -2411,4 +2415,49 @@ async fn watch_logs_addresses_the_sandbox_by_canonical_name() {
             Some(workspace)
         );
     }
+}
+
+fn conditional_request() -> openshell_sdk::ConditionalSandboxMutation {
+    openshell_sdk::ConditionalSandboxMutation {
+        expected_sandbox_id: "recorded-id".into(),
+        expected_resource_version: Some(7),
+        request_id: "13422f56-d02e-4b19-ab57-0417cf8e3893".into(),
+    }
+}
+
+#[tokio::test]
+async fn conditional_mutations_refuse_missing_or_unknown_capability_without_sending() {
+    for capabilities in [vec![], vec!["sandbox-mutation-preconditions-v2".into()]] {
+        let state = Arc::new(MockState { capabilities, ..Default::default() });
+        let endpoint = start_mock(state.clone()).await;
+        let client = connect(&endpoint).await;
+        assert!(client.stop_sandbox_conditional("target", conditional_request()).await.is_err());
+        assert!(client.delete_sandbox_conditional("target", openshell_sdk::DeleteOptions::default(),
+            conditional_request()).await.is_err());
+        assert!(state.last_stop.lock().await.is_none());
+        assert!(state.last_delete.lock().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn conditional_mutations_send_exact_preconditions_and_workspace_after_capability() {
+    let state = Arc::new(MockState {
+        capabilities: vec!["sandbox-mutation-preconditions-v1".into()],
+        ..Default::default()
+    });
+    let endpoint = start_mock(state.clone()).await;
+    let client = connect(&endpoint).await.workspace("test-workspace");
+    client.stop_sandbox_conditional("target", conditional_request()).await.unwrap();
+    client.delete_sandbox_conditional("target", openshell_sdk::DeleteOptions::default(),
+        conditional_request()).await.unwrap();
+    let stop = state.last_stop.lock().await.clone().unwrap();
+    let delete = state.last_delete.lock().await.clone().unwrap();
+    assert_eq!(stop.expected_sandbox_id.as_deref(), Some("recorded-id"));
+    assert_eq!(delete.expected_sandbox_id, stop.expected_sandbox_id);
+    assert_eq!(stop.expected_resource_version, Some(7));
+    assert_eq!(delete.expected_resource_version, Some(7));
+    assert_eq!(stop.request_id, conditional_request().request_id);
+    assert_eq!(delete.request_id, stop.request_id);
+    assert_eq!(selected_workspace(&stop.workspace_scope), Some("test-workspace"));
+    assert_eq!(selected_workspace(&delete.workspace_scope), Some("test-workspace"));
 }

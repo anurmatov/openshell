@@ -476,6 +476,8 @@ sandbox_mutation!(
     "StartSandbox",
     sandbox::handle_start_sandbox
 );
+// Descriptor-driven canonical_message includes both optional expectation fields,
+// including presence; request_id alone is removed from the replay fingerprint.
 sandbox_mutation!(
     StopSandboxRequest,
     "StopSandbox",

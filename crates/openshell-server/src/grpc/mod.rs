@@ -251,6 +251,7 @@ impl OpenShell for OpenShellService {
         Ok(Response::new(HealthResponse {
             status: ServiceStatus::Healthy.into(),
             version: openshell_core::VERSION.to_string(),
+            capabilities: vec!["sandbox-mutation-preconditions-v1".into()],
         }))
     }
 

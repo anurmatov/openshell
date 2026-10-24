@@ -15,7 +15,7 @@ use crate::pagination::{Page, Pager};
 use crate::raw::AuthedGrpcClient;
 use crate::refresh::{RefreshedToken, TokenSource};
 use crate::types::{
-    DeleteOptions, DeletionResult, ExecOptions, ExecResult, Health, ListOptions, SandboxPhase,
+    ConditionalSandboxMutation, DeleteOptions, DeletionResult, ExecOptions, ExecResult, Health, ListOptions, SandboxPhase,
     SandboxRef, SandboxSpec, SandboxTemplateCreateSpec, SandboxTemplateListOptions,
     SandboxWorkloadTemplate, WorkspaceRef,
 };
@@ -130,6 +130,7 @@ impl OpenShellClient {
             .unary(|mut grpc| async move { grpc.health(proto::HealthRequest {}).await })
             .await?;
         Ok(Health {
+            capabilities: resp.capabilities,
             status: resp.status.into(),
             version: resp.version,
         })
@@ -356,6 +357,8 @@ impl OpenShellClient {
         let response = self
             .unary(|mut grpc| {
                 let request = proto::DeleteSandboxRequest {
+                    expected_sandbox_id: None,
+                    expected_resource_version: None,
                     request_id: String::new(),
                     allow_missing: opts.allow_missing,
                     name: name.to_string(),
@@ -370,11 +373,27 @@ impl OpenShellClient {
         })
     }
 
+    /// Conditional default-workspace deletion; refuses unsupported gateways.
+    pub async fn delete_sandbox_conditional(
+        &self, name: &str, opts: DeleteOptions, condition: ConditionalSandboxMutation,
+    ) -> Result<DeletionResult> {
+        self.workspace("default").delete_sandbox_conditional(name, opts, condition).await
+    }
+
+    /// Conditional default-workspace stop; refuses unsupported gateways.
+    pub async fn stop_sandbox_conditional(
+        &self, name: &str, condition: ConditionalSandboxMutation,
+    ) -> Result<SandboxRef> {
+        self.workspace("default").stop_sandbox_conditional(name, condition).await
+    }
+
     /// Stop a sandbox by name.
     pub async fn stop_sandbox(&self, name: &str) -> Result<SandboxRef> {
         let response = self
             .unary(|mut grpc| {
                 let request = proto::StopSandboxRequest {
+                    expected_sandbox_id: None,
+                    expected_resource_version: None,
                     request_id: String::new(),
                     name: name.to_string(),
                     workspace_scope: Some(proto::workspace_selector("default")),
@@ -1072,6 +1091,8 @@ impl WorkspaceScopedClient {
             .client
             .unary(|mut grpc| {
                 let request = proto::DeleteSandboxRequest {
+                    expected_sandbox_id: None,
+                    expected_resource_version: None,
                     request_id: String::new(),
                     allow_missing: opts.allow_missing,
                     name: name.to_string(),
@@ -1086,12 +1107,68 @@ impl WorkspaceScopedClient {
         })
     }
 
+    /// Delete only the recorded immutable identity/version, never a replacement.
+    /// Capability proof is fetched for each call. No unguarded fallback is sent.
+    pub async fn delete_sandbox_conditional(
+        &self, name: &str, opts: DeleteOptions, condition: ConditionalSandboxMutation,
+    ) -> Result<DeletionResult> {
+        condition.validate()?;
+        self.require_conditional_mutations().await?;
+        let request = proto::DeleteSandboxRequest {
+            workspace_scope: Some(proto::workspace_selector(&self.workspace)),
+            name: name.into(),
+            allow_missing: opts.allow_missing,
+            request_id: condition.request_id,
+            expected_sandbox_id: Some(condition.expected_sandbox_id),
+            expected_resource_version: condition.expected_resource_version,
+        };
+        let response = self.client.unary(|mut grpc| {
+            let request = request.clone();
+            async move { grpc.delete_sandbox(request).await }
+        }).await?;
+        Ok(DeletionResult {
+            outcome: response.outcome.into(),
+            sandbox_id: (!response.sandbox_id.is_empty()).then_some(response.sandbox_id),
+        })
+    }
+
+    /// Stop only the recorded immutable identity/version, never a replacement.
+    pub async fn stop_sandbox_conditional(
+        &self, name: &str, condition: ConditionalSandboxMutation,
+    ) -> Result<SandboxRef> {
+        condition.validate()?;
+        self.require_conditional_mutations().await?;
+        let request = proto::StopSandboxRequest {
+            workspace_scope: Some(proto::workspace_selector(&self.workspace)),
+            name: name.into(),
+            request_id: condition.request_id,
+            expected_sandbox_id: Some(condition.expected_sandbox_id),
+            expected_resource_version: condition.expected_resource_version,
+        };
+        let response = self.client.unary(|mut grpc| {
+            let request = request.clone();
+            async move { grpc.stop_sandbox(request).await }
+        }).await?;
+        sandbox_from_response(response.sandbox)
+    }
+
+    async fn require_conditional_mutations(&self) -> Result<()> {
+        let health = self.client.health().await?;
+        if !health.capabilities.iter().any(|value| value == "sandbox-mutation-preconditions-v1") {
+            return Err(SdkError::invalid_config(
+                "gateway does not advertise sandbox-mutation-preconditions-v1; conditional mutation refused"));
+        }
+        Ok(())
+    }
+
     /// Stop a sandbox by name in this workspace.
     pub async fn stop_sandbox(&self, name: &str) -> Result<SandboxRef> {
         let response = self
             .client
             .unary(|mut grpc| {
                 let request = proto::StopSandboxRequest {
+                    expected_sandbox_id: None,
+                    expected_resource_version: None,
                     request_id: String::new(),
                     name: name.to_string(),
                     workspace_scope: Some(proto::workspace_selector(&self.workspace)),

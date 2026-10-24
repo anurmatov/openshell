@@ -150,6 +150,7 @@ impl OpenShell for TestOpenShell {
         _request: tonic::Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
         Ok(Response::new(HealthResponse {
+            capabilities: Vec::new(),
             status: ServiceStatus::Healthy.into(),
             version: "test".to_string(),
         }))
