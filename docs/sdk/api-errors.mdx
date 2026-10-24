@@ -275,6 +275,40 @@ the third argument; use `None` to retain name-only behavior.
 a newly created resource with that name. Do not blindly repeat a timed-out
 deletion when names might be reused.
 
+### Conditional sandbox stop and delete
+
+For name-reuse-safe mutations, first read the sandbox's immutable ID and optional
+resource version in its workspace. Require the gateway's Health response to
+advertise `sandbox-mutation-preconditions-v1` before sending either StopSandbox
+or DeleteSandbox with `expected_sandbox_id` and optional
+`expected_resource_version`. An absent, unknown or unreadable capability is not
+support. Do not infer it from a version string. All backends serving that gateway
+endpoint must implement the advertised contract; a mixed old/new endpoint is not
+qualified for conditional mutation.
+
+Rust callers can use `ConditionalSandboxMutation` with
+`stop_sandbox_conditional` or `delete_sandbox_conditional` on the default or
+workspace-scoped client. These methods fetch capability proof on each call and
+refuse before sending a mutation if proof is unavailable. They never fall back
+to an unconditional request. Ordinary Stop/Delete methods retain their existing
+name-keyed behavior. Raw RPCs and other SDKs must enforce the capability check
+themselves before using the new fields; this change does not add conditional
+CLI flags or curated helpers in other SDKs.
+
+An omitted ID/version preserves ordinary behavior. A present empty ID, a zero
+version, or a version without an ID returns `INVALID_ARGUMENT`. A mismatched ID
+or version returns `ABORTED` without changing the replacement. The gateway
+checks expectations under the lifecycle lock and retains them across CAS
+conflicts rather than following a newer version.
+
+Keep one nonzero UUID `request_id` and exactly the same expectations for retries
+after a timeout or disconnect. Field presence and values are part of the replay
+fingerprint; changing them with the same request ID conflicts. Current workspace
+authorization still precedes replay. A successful stop acknowledgement, an
+accepted deletion, missing target or replay response is not general proof of
+external resource cleanup. Reconcile the original immutable ID before releasing
+resources or starting rollback; never retry blindly with a new request ID.
+
 ### SDK migration for deletion
 
 Upgrade gateways and clients together. This pre-1.0 change removes the boolean

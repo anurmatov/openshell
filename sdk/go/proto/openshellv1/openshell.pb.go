@@ -1647,7 +1647,10 @@ type HealthResponse struct {
 	// Service status.
 	Status ServiceStatus `protobuf:"varint,1,opt,name=status,proto3,enum=openshell.v1.ServiceStatus" json:"status,omitempty"`
 	// Service version.
-	Version       string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Version string `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	// Explicit, additive protocol capabilities. Unknown entries must be ignored.
+	// sandbox-mutation-preconditions-v1 covers conditional Stop AND Delete.
+	Capabilities  []string `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1694,6 +1697,13 @@ func (x *HealthResponse) GetVersion() string {
 		return x.Version
 	}
 	return ""
+}
+
+func (x *HealthResponse) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
 }
 
 // Current-user request. The identity comes from the authenticated request.
@@ -4615,9 +4625,15 @@ type DeleteSandboxRequest struct {
 	AllowMissing bool `protobuf:"varint,3,opt,name=allow_missing,json=allowMissing,proto3" json:"allow_missing,omitempty"`
 	// Optional nonzero UUID for durable at-most-once admission. Successful results
 	// can be replayed for 24 hours; see the API errors and retries reference.
-	RequestId     string `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RequestId string `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Optional immutable identity guard. Present empty is INVALID_ARGUMENT.
+	// Require sandbox-mutation-preconditions-v1 capability before sending.
+	ExpectedSandboxId *string `protobuf:"bytes,5,opt,name=expected_sandbox_id,json=expectedSandboxId,proto3,oneof" json:"expected_sandbox_id,omitempty"`
+	// Optional nonzero version guard; requires expected_sandbox_id.
+	// Mismatches return ABORTED without mutating a replacement.
+	ExpectedResourceVersion *uint64 `protobuf:"varint,6,opt,name=expected_resource_version,json=expectedResourceVersion,proto3,oneof" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *DeleteSandboxRequest) Reset() {
@@ -4678,6 +4694,20 @@ func (x *DeleteSandboxRequest) GetRequestId() string {
 	return ""
 }
 
+func (x *DeleteSandboxRequest) GetExpectedSandboxId() string {
+	if x != nil && x.ExpectedSandboxId != nil {
+		return *x.ExpectedSandboxId
+	}
+	return ""
+}
+
+func (x *DeleteSandboxRequest) GetExpectedResourceVersion() uint64 {
+	if x != nil && x.ExpectedResourceVersion != nil {
+		return *x.ExpectedResourceVersion
+	}
+	return 0
+}
+
 // Stop sandbox request.
 type StopSandboxRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -4686,9 +4716,15 @@ type StopSandboxRequest struct {
 	Name           string                         `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Optional nonzero UUID for durable at-most-once admission. Successful results
 	// can be replayed for 24 hours; see the API errors and retries reference.
-	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RequestId string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Optional immutable identity guard. Present empty is INVALID_ARGUMENT.
+	// Require sandbox-mutation-preconditions-v1 capability before sending.
+	ExpectedSandboxId *string `protobuf:"bytes,4,opt,name=expected_sandbox_id,json=expectedSandboxId,proto3,oneof" json:"expected_sandbox_id,omitempty"`
+	// Optional nonzero version guard; requires expected_sandbox_id.
+	// Mismatches return ABORTED without mutating a replacement.
+	ExpectedResourceVersion *uint64 `protobuf:"varint,5,opt,name=expected_resource_version,json=expectedResourceVersion,proto3,oneof" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *StopSandboxRequest) Reset() {
@@ -4740,6 +4776,20 @@ func (x *StopSandboxRequest) GetRequestId() string {
 		return x.RequestId
 	}
 	return ""
+}
+
+func (x *StopSandboxRequest) GetExpectedSandboxId() string {
+	if x != nil && x.ExpectedSandboxId != nil {
+		return *x.ExpectedSandboxId
+	}
+	return ""
+}
+
+func (x *StopSandboxRequest) GetExpectedResourceVersion() uint64 {
+	if x != nil && x.ExpectedResourceVersion != nil {
+		return *x.ExpectedResourceVersion
+	}
+	return 0
 }
 
 // Start sandbox request.
@@ -19423,10 +19473,11 @@ const file_openshell_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x06 \x01(\tR\tsessionId\x12)\n" +
 	"\x10credential_epoch\x18\a \x01(\x04R\x0fcredentialEpochJ\x04\b\x02\x10\x03J\x04\b\x05\x10\x06R\rexpires_at_msR\x15sandbox_expires_at_ms\"\x0f\n" +
-	"\rHealthRequest\"_\n" +
+	"\rHealthRequest\"\x83\x01\n" +
 	"\x0eHealthResponse\x123\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x1b.openshell.v1.ServiceStatusR\x06status\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\tR\aversion\"\x17\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\"\n" +
+	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\"\x17\n" +
 	"\x15GetCurrentUserRequest\"\xb0\x01\n" +
 	"\x16GetCurrentUserResponse\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12!\n" +
@@ -19669,18 +19720,26 @@ const file_openshell_proto_rawDesc = "" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12:\n" +
 	"\x19expected_resource_version\x18\x03 \x01(\x04R\x17expectedResourceVersion\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x05 \x01(\tR\trequestId\"\xc2\x01\n" +
+	"request_id\x18\x05 \x01(\tR\trequestId\"\xee\x02\n" +
 	"\x14DeleteSandboxRequest\x12R\n" +
 	"\x0fworkspace_scope\x18\x02 \x01(\v2).openshell.datamodel.v1.WorkspaceSelectorR\x0eworkspaceScope\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rallow_missing\x18\x03 \x01(\bR\fallowMissing\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x04 \x01(\tR\trequestId\"\x9b\x01\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId\x123\n" +
+	"\x13expected_sandbox_id\x18\x05 \x01(\tH\x00R\x11expectedSandboxId\x88\x01\x01\x12?\n" +
+	"\x19expected_resource_version\x18\x06 \x01(\x04H\x01R\x17expectedResourceVersion\x88\x01\x01B\x16\n" +
+	"\x14_expected_sandbox_idB\x1c\n" +
+	"\x1a_expected_resource_version\"\xc7\x02\n" +
 	"\x12StopSandboxRequest\x12R\n" +
 	"\x0fworkspace_scope\x18\x02 \x01(\v2).openshell.datamodel.v1.WorkspaceSelectorR\x0eworkspaceScope\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x03 \x01(\tR\trequestId\"\x9c\x01\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\x123\n" +
+	"\x13expected_sandbox_id\x18\x04 \x01(\tH\x00R\x11expectedSandboxId\x88\x01\x01\x12?\n" +
+	"\x19expected_resource_version\x18\x05 \x01(\x04H\x01R\x17expectedResourceVersion\x88\x01\x01B\x16\n" +
+	"\x14_expected_sandbox_idB\x1c\n" +
+	"\x1a_expected_resource_version\"\x9c\x01\n" +
 	"\x13StartSandboxRequest\x12R\n" +
 	"\x0fworkspace_scope\x18\x02 \x01(\v2).openshell.datamodel.v1.WorkspaceSelectorR\x0eworkspaceScope\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
@@ -22064,6 +22123,8 @@ func file_openshell_proto_init() {
 	file_openshell_proto_msgTypes[20].OneofWrappers = []any{}
 	file_openshell_proto_msgTypes[21].OneofWrappers = []any{}
 	file_openshell_proto_msgTypes[29].OneofWrappers = []any{}
+	file_openshell_proto_msgTypes[47].OneofWrappers = []any{}
+	file_openshell_proto_msgTypes[48].OneofWrappers = []any{}
 	file_openshell_proto_msgTypes[56].OneofWrappers = []any{
 		(*ConfigSnapshotRevision_SandboxConfig)(nil),
 		(*ConfigSnapshotRevision_ProviderEnvironment)(nil),

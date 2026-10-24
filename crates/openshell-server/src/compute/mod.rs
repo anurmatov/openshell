@@ -307,14 +307,56 @@ struct SandboxDeleteTarget {
     sandbox_name: String,
 }
 
-/// Optional caller-owned preconditions for an identity-safe sandbox delete.
+/// Optional caller-owned preconditions for identity-safe sandbox deletion or stop.
 ///
 /// These values are validated again while holding the sandbox lifecycle and
-/// scoped mutation locks, immediately before the durable `Deleting` mutation.
+/// scoped mutation locks, immediately before a durable lifecycle mutation.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SandboxDeletePreconditions {
     pub expected_sandbox_id: Option<String>,
     pub expected_resource_version: Option<u64>,
+}
+
+impl SandboxDeletePreconditions {
+    fn validate(&self) -> Result<(), Status> {
+        if self.expected_sandbox_id.as_deref() == Some("") {
+            return Err(Status::invalid_argument(
+                "expected_sandbox_id must not be empty",
+            ));
+        }
+        if self.expected_resource_version == Some(0) {
+            return Err(Status::invalid_argument(
+                "expected_resource_version must be nonzero",
+            ));
+        }
+        if self.expected_resource_version.is_some() && self.expected_sandbox_id.is_none() {
+            return Err(Status::invalid_argument(
+                "expected_resource_version requires expected_sandbox_id",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check(&self, current: &Sandbox) -> Result<(), Status> {
+        if self
+            .expected_sandbox_id
+            .as_deref()
+            .is_some_and(|expected| expected != current.object_id())
+        {
+            return Err(Status::aborted(
+                "sandbox identity does not match expected_sandbox_id",
+            ));
+        }
+        if self
+            .expected_resource_version
+            .is_some_and(|expected| expected != sandbox_resource_version(current))
+        {
+            return Err(Status::aborted(
+                "sandbox resource version does not match expected_resource_version",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Identity and driver result for a completed delete request.
@@ -1804,11 +1846,23 @@ impl ComputeRuntime {
             .map(|response| response.into_inner().deleted)
     }
 
+    #[cfg(test)]
     pub(crate) async fn stop_sandbox(
         &self,
         workspace: &str,
         name: &str,
     ) -> Result<Sandbox, Status> {
+        self.stop_sandbox_with_preconditions(workspace, name, SandboxDeletePreconditions::default())
+            .await
+    }
+
+    pub(crate) async fn stop_sandbox_with_preconditions(
+        &self,
+        workspace: &str,
+        name: &str,
+        preconditions: SandboxDeletePreconditions,
+    ) -> Result<Sandbox, Status> {
+        preconditions.validate()?;
         let candidate = self
             .store
             .get_message_by_name::<Sandbox>(workspace, name)
@@ -1833,6 +1887,9 @@ impl ComputeRuntime {
 
         let mut attempt = 1;
         let (previous, stopping) = loop {
+            // Recheck after the locked read AND every CAS-conflict refresh.
+            // A conditional request may not follow another writer's version.
+            preconditions.check(&current)?;
             provisioning_operation::ensure_operation_settled(&current)?;
             let phase = SandboxPhase::try_from(current.phase()).unwrap_or(SandboxPhase::Unknown);
             if matches!(phase, SandboxPhase::Stopped | SandboxPhase::Completed)
@@ -2776,13 +2833,7 @@ impl ComputeRuntime {
         allow_missing: bool,
         preconditions: SandboxDeletePreconditions,
     ) -> Result<DeleteSandboxResult, Status> {
-        if preconditions.expected_resource_version.is_some()
-            && preconditions.expected_sandbox_id.is_none()
-        {
-            return Err(Status::invalid_argument(
-                "expected_resource_version requires expected_sandbox_id",
-            ));
-        }
+        preconditions.validate()?;
         // Resolve and acquire both request-side locks before spawning the
         // owned worker. Cancellation while any of these awaits is pending is
         // harmless because no mutation or detached work has started.
@@ -2893,29 +2944,18 @@ impl ComputeRuntime {
                 "sandbox name changed while the delete request was waiting; retry explicitly",
             ));
         }
-        if preconditions
-            .expected_sandbox_id
-            .as_deref()
-            .is_some_and(|expected| expected != current.object_id())
-        {
-            return Err(Status::aborted(
-                "sandbox identity changed before delete mutation",
-            ));
-        }
-        if preconditions
-            .expected_resource_version
-            .is_some_and(|expected| expected != sandbox_resource_version(&current))
-        {
-            return Err(Status::aborted(
-                "sandbox resource version changed before delete mutation",
-            ));
-        }
+        preconditions.check(&current)?;
 
         // `Started` carries both sides of the CAS transition: the durable
         // `Deleting` row used to fence recovery, and the prior row used only
         // for exact-version rollback after an ambiguous driver failure.
         let transition = match self
-            .begin_sandbox_delete_with_initial_snapshot(&target.sandbox_id, Some(current), None)
+            .begin_conditional_sandbox_delete(
+                &target.sandbox_id,
+                Some(current),
+                None,
+                &preconditions,
+            )
             .await?
         {
             BeginDelete::AlreadyDeleting => {
@@ -2993,8 +3033,24 @@ impl ComputeRuntime {
     async fn begin_sandbox_delete_with_initial_snapshot(
         &self,
         sandbox_id: &str,
+        initial_snapshot: Option<Sandbox>,
+        failed_create: Option<&Sandbox>,
+    ) -> Result<BeginDelete, Status> {
+        self.begin_conditional_sandbox_delete(
+            sandbox_id,
+            initial_snapshot,
+            failed_create,
+            &SandboxDeletePreconditions::default(),
+        )
+        .await
+    }
+
+    async fn begin_conditional_sandbox_delete(
+        &self,
+        sandbox_id: &str,
         mut initial_snapshot: Option<Sandbox>,
         failed_create: Option<&Sandbox>,
+        preconditions: &SandboxDeletePreconditions,
     ) -> Result<BeginDelete, Status> {
         let operation = "set sandbox phase to Deleting";
 
@@ -3008,6 +3064,7 @@ impl ComputeRuntime {
                     .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
                     .ok_or_else(|| Status::not_found("sandbox not found"))?,
             };
+            preconditions.check(&sandbox)?;
             provisioning_operation::ensure_operation_settled(&sandbox)?;
 
             // Failed-create compensation owns only its original attempt.
@@ -13942,47 +13999,58 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_delete_does_not_retarget_a_reused_name() {
-        let driver = ControlledDriver::new();
-        let runtime = test_runtime(driver.clone()).await;
-        let original = sandbox_record("sb-original", "sandbox-a", SandboxPhase::Ready);
-        runtime.store.put_message(&original).await.unwrap();
+        for expected_sandbox_id in [None, Some("sb-original".to_string())] {
+            let driver = ControlledDriver::new();
+            let runtime = test_runtime(driver.clone()).await;
+            let original = sandbox_record("sb-original", "sandbox-a", SandboxPhase::Ready);
+            runtime.store.put_message(&original).await.unwrap();
 
-        // Hold the original ID's gate so the request resolves the name and
-        // then waits before it can revalidate the durable row.
-        let delete_gate = runtime.lifecycle_gates.gate_for(original.object_id());
-        let delete_guard = delete_gate.lock().await;
-        let delete_runtime = runtime.clone();
-        let delete =
-            tokio::spawn(
-                async move { delete_runtime.delete_sandbox("default", "sandbox-a").await },
-            );
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while Arc::strong_count(&delete_gate) < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("delete did not start waiting on the original ID gate");
-
-        runtime
-            .store
-            .delete(Sandbox::object_type(), original.object_id())
+            // Hold the original ID's gate so the request resolves the name and
+            // then waits before it can revalidate the durable row.
+            let delete_gate = runtime.lifecycle_gates.gate_for(original.object_id());
+            let delete_guard = delete_gate.lock().await;
+            let delete_runtime = runtime.clone();
+            let delete = tokio::spawn(async move {
+                delete_runtime
+                    .delete_sandbox_allow_missing_with_preconditions(
+                        "default",
+                        "sandbox-a",
+                        false,
+                        SandboxDeletePreconditions {
+                            expected_sandbox_id,
+                            expected_resource_version: None,
+                        },
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while Arc::strong_count(&delete_gate) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .unwrap();
-        let replacement = sandbox_record("sb-replacement", "sandbox-a", SandboxPhase::Ready);
-        runtime.store.put_message(&replacement).await.unwrap();
-        drop(delete_guard);
+            .expect("delete did not start waiting on the original ID gate");
 
-        assert!(delete.await.unwrap().unwrap().acknowledged());
-        assert_eq!(driver.delete_calls(), 0);
-        assert!(
             runtime
                 .store
-                .get_message::<Sandbox>(replacement.object_id())
+                .delete(Sandbox::object_type(), original.object_id())
                 .await
-                .unwrap()
-                .is_some()
-        );
+                .unwrap();
+            let replacement = sandbox_record("sb-replacement", "sandbox-a", SandboxPhase::Ready);
+            runtime.store.put_message(&replacement).await.unwrap();
+            drop(delete_guard);
+
+            assert!(delete.await.unwrap().unwrap().acknowledged());
+            assert_eq!(driver.delete_calls(), 0);
+            assert!(
+                runtime
+                    .store
+                    .get_message::<Sandbox>(replacement.object_id())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     #[tokio::test]
@@ -14080,6 +14148,198 @@ mod tests {
             SandboxPhase::try_from(current.phase()).unwrap(),
             SandboxPhase::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_does_not_follow_a_cas_conflict_to_a_new_version() {
+        let driver = ControlledDriver::new();
+        let runtime = test_runtime(driver.clone()).await;
+        let sandbox = sandbox_record("cas-id", "cas-target", SandboxPhase::Ready);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        let stale = runtime
+            .store
+            .get_message::<Sandbox>("cas-id")
+            .await
+            .unwrap()
+            .unwrap();
+        let version = sandbox_resource_version(&stale);
+        runtime
+            .store
+            .update_message_cas::<Sandbox, _>("cas-id", version, |sandbox| {
+                sandbox.set_current_policy_version(8)
+            })
+            .await
+            .unwrap();
+        let result = runtime
+            .begin_conditional_sandbox_delete(
+                "cas-id",
+                Some(stale),
+                None,
+                &SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("cas-id".into()),
+                    expected_resource_version: Some(version),
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(ref error) if error.code() == Code::Aborted));
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("cas-id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
+        assert_eq!(retained.current_policy_version(), 8);
+        assert_eq!(driver.delete_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn conditional_stop_waiting_on_retired_id_never_stops_same_name_replacement() {
+        let driver = ControlledDriver::new();
+        let runtime = test_runtime(driver.clone()).await;
+        let original = sandbox_record("retiring-id", "reusable", SandboxPhase::Ready);
+        runtime.store.put_message(&original).await.unwrap();
+        let gate = runtime.lifecycle_gates.gate_for("retiring-id");
+        let held = gate.lock().await;
+        let worker = runtime.clone();
+        let request = tokio::spawn(async move {
+            worker
+                .stop_sandbox_with_preconditions(
+                    "default",
+                    "reusable",
+                    SandboxDeletePreconditions {
+                        expected_sandbox_id: Some("retiring-id".into()),
+                        expected_resource_version: None,
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&gate) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop has resolved the old immutable ID");
+        runtime
+            .store
+            .delete(Sandbox::object_type(), "retiring-id")
+            .await
+            .unwrap();
+        runtime
+            .store
+            .put_message(&sandbox_record(
+                "replacement-id",
+                "reusable",
+                SandboxPhase::Ready,
+            ))
+            .await
+            .unwrap();
+        drop(held);
+        assert_eq!(request.await.unwrap().unwrap_err().code(), Code::NotFound);
+        assert_eq!(driver.stop_calls(), 0);
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("replacement-id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
+    }
+
+    #[tokio::test]
+    async fn conditional_stop_checks_the_locked_version_before_any_write() {
+        let driver = ControlledDriver::new();
+        let runtime = test_runtime(driver.clone()).await;
+        let sandbox = sandbox_record("stop-id", "conditional", SandboxPhase::Ready);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        let current = runtime
+            .store
+            .get_message::<Sandbox>("stop-id")
+            .await
+            .unwrap()
+            .unwrap();
+        let version = sandbox_resource_version(&current);
+        let gate = runtime.lifecycle_gates.gate_for("stop-id");
+        let held = gate.lock().await;
+        let worker = runtime.clone();
+        let request = tokio::spawn(async move {
+            worker
+                .stop_sandbox_with_preconditions(
+                    "default",
+                    "conditional",
+                    SandboxDeletePreconditions {
+                        expected_sandbox_id: Some("stop-id".into()),
+                        expected_resource_version: Some(version),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&gate) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop waits on the resolved immutable ID gate");
+        runtime
+            .store
+            .update_message_cas::<Sandbox, _>("stop-id", version, |sandbox| {
+                sandbox.set_current_policy_version(9)
+            })
+            .await
+            .unwrap();
+        drop(held);
+        assert_eq!(request.await.unwrap().unwrap_err().code(), Code::Aborted);
+        assert_eq!(driver.stop_calls(), 0);
+        let retained = runtime
+            .store
+            .get_message::<Sandbox>("stop-id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase(), SandboxPhase::Ready as i32);
+        assert_eq!(retained.current_policy_version(), 9);
+    }
+
+    #[tokio::test]
+    async fn conditional_stop_rejects_reused_name_and_accepts_current_identity() {
+        let driver = ControlledDriver::new();
+        let runtime = test_runtime(driver.clone()).await;
+        let sandbox = sandbox_record("fresh-id", "reused", SandboxPhase::Ready);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        let error = runtime
+            .stop_sandbox_with_preconditions(
+                "default",
+                "reused",
+                SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("retired-id".into()),
+                    expected_resource_version: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Aborted);
+        assert_eq!(driver.stop_calls(), 0);
+        let current = runtime
+            .store
+            .get_message::<Sandbox>("fresh-id")
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = runtime
+            .stop_sandbox_with_preconditions(
+                "default",
+                "reused",
+                SandboxDeletePreconditions {
+                    expected_sandbox_id: Some("fresh-id".into()),
+                    expected_resource_version: Some(sandbox_resource_version(&current)),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped.object_id(), "fresh-id");
+        assert_eq!(driver.stop_calls(), 1);
     }
 
     #[tokio::test]

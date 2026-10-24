@@ -156,8 +156,12 @@ mod tests {
     // Sandbox-wide grant reporting adds TokenGrantFailureObservation to both
     // closures and TokenGrantStatus to public reports. Older rows have no grant
     // record; absent report extensions retain compatibility without a rewrite.
+    // Conditional Stop/Delete add presence-aware expected identity/version
+    // fields, and Health advertises their additive protocol capability.
+    // Absent expectations retain legacy name-keyed behavior. These request
+    // and health fields are public-only; no durable or overlap type changes.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "a91e2244a2c1a8e369efe85bd0e4f2769f0f29f6263137280fe38e8a8da3cc6e";
+        "d2eab708f06f6d50fccec3043b5c061d82ae0593867e56a650571eeb28d4d79e";
     const DURABLE_SCHEMA_SHA256: &str =
         "d4dc7abdb91b919db1f7be0d4652e30cbfda86f3b2ed9b59d5de1f76a2bf691d";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =

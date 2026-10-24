@@ -23,6 +23,30 @@ pub struct DeleteOptions {
     pub allow_missing: bool,
 }
 
+/// Preconditions and stable replay identity for a conditional Stop or Delete.
+/// Reuse the complete value after a timeout; never generate a new request ID
+/// merely because the result is unknown.
+#[derive(Clone, Debug)]
+pub struct ConditionalSandboxMutation {
+    pub expected_sandbox_id: String,
+    pub expected_resource_version: Option<u64>,
+    pub request_id: String,
+}
+
+impl ConditionalSandboxMutation {
+    pub(crate) fn validate(&self) -> crate::error::Result<()> {
+        if self.expected_sandbox_id.is_empty()
+            || self.expected_resource_version == Some(0)
+            || self.request_id.is_empty()
+        {
+            return Err(crate::SdkError::invalid_config(
+                "conditional mutation requires an ID, a nonzero version when supplied, and a stable request_id",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A deletion acknowledgement is not necessarily completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -67,6 +91,8 @@ pub struct DeletionResult {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Health {
+    /// Explicit gateway protocol capabilities, not inferred from version.
+    pub capabilities: Vec<String>,
     pub status: ServiceStatus,
     pub version: String,
 }

@@ -4041,6 +4041,8 @@ pub async fn sandbox_delete(
 
         let response = match client
             .delete_sandbox(DeleteSandboxRequest {
+                expected_sandbox_id: None,
+                expected_resource_version: None,
                 request_id: String::new(),
                 allow_missing: true,
                 name: name.clone(),
@@ -4104,6 +4106,8 @@ pub async fn sandbox_stop(
     let mut client = grpc_client(server, tls).await?;
     let sandbox = client
         .stop_sandbox(StopSandboxRequest {
+            expected_sandbox_id: None,
+            expected_resource_version: None,
             request_id: String::new(),
             name: name.to_string(),
             workspace_scope: Some(openshell_core::proto::workspace_selector(
