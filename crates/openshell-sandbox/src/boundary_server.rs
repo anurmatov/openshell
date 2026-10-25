@@ -4816,6 +4816,7 @@ mod linux {
         #[tokio::test]
         async fn ownership_inventory_authentication_and_replacement_have_zero_lifecycle_effects() {
             let (runtime, token) = availability_test_runtime();
+            let supervisor_instance = test_supervisor_instance_id();
             assert!(
                 runtime
                     .authenticate_request(
@@ -4837,7 +4838,7 @@ mod linux {
             );
             runtime
                 .connections
-                .attach(&first, test_supervisor_instance_id())
+                .attach(&first, supervisor_instance)
                 .unwrap();
             assert!(
                 runtime
@@ -4863,9 +4864,24 @@ mod linux {
                     bearer_request((), &token).metadata(),
                 )
                 .unwrap();
+            // A new principal cannot displace a live connection or change
+            // supervisor incarnation. Reconnection requires proven disconnect.
+            assert!(
+                runtime
+                    .connections
+                    .attach(&second, test_supervisor_instance_id())
+                    .is_err()
+            );
+            assert!(
+                runtime
+                    .connections
+                    .attach(&second, supervisor_instance)
+                    .is_err()
+            );
+            assert!(runtime.connections.disconnect(first.connection_id()));
             runtime
                 .connections
-                .attach(&second, test_supervisor_instance_id())
+                .attach(&second, supervisor_instance)
                 .unwrap();
             runtime.connections.confirm(&second).unwrap();
             assert!(
