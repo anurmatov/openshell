@@ -218,6 +218,9 @@ and rechecks current supervisor, running process and installed policy before
 returning facts under the existing 1 MiB control ceiling. Partial reads, races,
 missing owners and overflow refuse rather than return truncated/empty evidence.
 The client also checks the exact generation, main process and attached policy.
+Inventory reads use only the cached authenticated connection and a captured
+credential; missing/expired/drifted credentials or missing/aborted/replaced
+channels refuse without renewal, reconnect, Attach or Confirm replay.
 This is not yet qualified producer emission, a usable gateway snapshot or a
 closed terminal journal; those connected paths and full package acceptance
 remain incomplete, with capabilities withheld and broker barriers unqualified.
