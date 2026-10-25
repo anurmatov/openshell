@@ -166,9 +166,12 @@ read exercise the builder without sending Create or changing its audited flag.
 TypeScript now projects the original binary Create through that same exact
 compiled descriptor and checks the shared canonical/finite-number source vectors;
 its build carries the unchanged asset in the published package.
-Curated Python/TypeScript receipt/fence methods and Python canonical parity remain
-incomplete alongside trusted observations and retained journals; source
-conformance is not runtime proof.
+Python now also projects original binary Create through the same compiled
+descriptor, preserving only original-request authority and immutable key bytes;
+its source oracle checks the shared projection/finite-number vectors and refuses
+invalid input without importing unrelated HTTP dependencies.
+Curated Python/TypeScript receipt/fence methods remain incomplete alongside
+trusted observations and retained journals; source conformance is not runtime proof.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and
