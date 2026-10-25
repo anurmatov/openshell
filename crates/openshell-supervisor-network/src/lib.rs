@@ -17,6 +17,8 @@ pub mod identity;
 pub mod identity_source;
 pub mod l7;
 pub mod opa;
+#[cfg(target_os = "linux")]
+pub mod ownership;
 pub(crate) mod policy_dns;
 pub mod policy_local;
 pub mod procfs;

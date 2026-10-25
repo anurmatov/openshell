@@ -30,12 +30,23 @@ def key():
 
 def receipt():
     value = pb.GetSandboxCreateReceiptResponse(
-        receipt_state=2, request_id=REQUEST, fingerprint=key().fingerprint,
-        fingerprint_schema_digest=key().schema_digest, receipt_revision=1,
-        coverage_epoch="epoch-a", complete=True,
-        bindings=[pb.CreateOwnershipBinding(claim_incarnation_id=CLAIM,
-            sandbox_id=SANDBOX, initial_resource_version=1,
-            current_resource_version=2, effect_state=4, binding_revision=1)],
+        receipt_state=2,
+        request_id=REQUEST,
+        fingerprint=key().fingerprint,
+        fingerprint_schema_digest=key().schema_digest,
+        receipt_revision=1,
+        coverage_epoch="epoch-a",
+        complete=True,
+        bindings=[
+            pb.CreateOwnershipBinding(
+                claim_incarnation_id=CLAIM,
+                sandbox_id=SANDBOX,
+                initial_resource_version=1,
+                current_resource_version=2,
+                effect_state=4,
+                binding_revision=1,
+            )
+        ],
     )
     value.created_at.seconds = 1
     value.completed_at.seconds = 2
@@ -44,15 +55,28 @@ def receipt():
 
 @pytest.fixture
 def connection():
-    state = SimpleNamespace(capable=True, health=0, reads=[], fences=[], auth=[], deadlines=[],
-                            response=receipt(), code=None, mutate=None)
+    state = SimpleNamespace(
+        capable=True,
+        health=0,
+        reads=[],
+        fences=[],
+        auth=[],
+        deadlines=[],
+        response=receipt(),
+        code=None,
+        mutate=None,
+    )
+
     def health(_request, context):
         state.health += 1
         state.deadlines.append(context.time_remaining())
         state.auth.append(dict(context.invocation_metadata()).get("authorization"))
         if state.mutate:
             state.mutate()
-        return pb.HealthResponse(capabilities=["sandbox-create-ownership-v1"] if state.capable else [])
+        return pb.HealthResponse(
+            capabilities=["sandbox-create-ownership-v1"] if state.capable else []
+        )
+
     def read(request, context):
         state.reads.append(request)
         state.deadlines.append(context.time_remaining())
@@ -60,25 +84,43 @@ def connection():
         if state.code:
             context.abort(state.code, "synthetic refusal")
         return state.response
+
     def fence(request, context):
         state.fences.append(request)
         if state.code:
             context.abort(state.code, "synthetic ambiguous reply")
         return pb.FenceSandboxCreateResponse(receipt=state.response)
+
     methods = {}
     for name, handler, request_type, response_type in [
         ("Health", health, pb.HealthRequest, pb.HealthResponse),
-        ("GetSandboxCreateReceipt", read, pb.GetSandboxCreateReceiptRequest, pb.GetSandboxCreateReceiptResponse),
-        ("FenceSandboxCreate", fence, pb.FenceSandboxCreateRequest, pb.FenceSandboxCreateResponse),
+        (
+            "GetSandboxCreateReceipt",
+            read,
+            pb.GetSandboxCreateReceiptRequest,
+            pb.GetSandboxCreateReceiptResponse,
+        ),
+        (
+            "FenceSandboxCreate",
+            fence,
+            pb.FenceSandboxCreateRequest,
+            pb.FenceSandboxCreateResponse,
+        ),
     ]:
-        methods[name] = grpc.unary_unary_rpc_method_handler(handler,
+        methods[name] = grpc.unary_unary_rpc_method_handler(
+            handler,
             request_deserializer=request_type.FromString,
-            response_serializer=response_type.SerializeToString)
+            response_serializer=response_type.SerializeToString,
+        )
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler("openshell.v1.OpenShell", methods),))
+    server.add_generic_rpc_handlers(
+        (grpc.method_handlers_generic_handler("openshell.v1.OpenShell", methods),)
+    )
     port = server.add_insecure_port("127.0.0.1:0")
     server.start()
-    with SandboxClient(f"127.0.0.1:{port}", timeout=2, bearer_token="owned-synthetic") as client:
+    with SandboxClient(
+        f"127.0.0.1:{port}", timeout=2, bearer_token="owned-synthetic"
+    ) as client:
         try:
             yield CreateOwnershipClient.from_sandbox_client(client), state
         finally:
@@ -89,7 +131,7 @@ def test_generated_read_preserves_original_key_identity_and_fresh_auth(connectio
     client, state = connection
     result = client.get("workspace-a", key(), expected_sandbox_id=SANDBOX)
     assert result.state == 2 and result.bindings[0].sandbox_id == SANDBOX
-    request, = state.reads
+    (request,) = state.reads
     assert request.workspace_scope.workspace == "workspace-a"
     assert request.request_id == REQUEST
     assert request.payload_fingerprint == key().fingerprint
@@ -106,7 +148,10 @@ def test_capability_rechecked_each_call_without_downgrade(connection):
     client, state = connection
     client.get("workspace-a", key())
     state.capable = False
-    for call in [lambda: client.get("workspace-a", key()), lambda: client.fence("workspace-a", key())]:
+    for call in [
+        lambda: client.get("workspace-a", key()),
+        lambda: client.fence("workspace-a", key()),
+    ]:
         with pytest.raises(ValueError, match="capability"):
             call()
     assert state.health == 3 and len(state.reads) == 1 and not state.fences
@@ -120,12 +165,29 @@ def test_invalid_workspace_makes_no_rpc(connection, workspace):
     assert state.health == 0 and not state.reads and not state.fences
 
 
-@pytest.mark.parametrize("fault", [
-    "unknown", "wrong-id", "fingerprint", "schema", "epoch", "zero-revision",
-    "timestamp", "nonterminal", "false-nonterminal", "duplicate",
-    "zero-initial", "zero-current", "foreign-sandbox", "abandoned",
-    "fenced", "complete-pending", "too-many", "missing-created",
-])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "unknown",
+        "wrong-id",
+        "fingerprint",
+        "schema",
+        "epoch",
+        "zero-revision",
+        "timestamp",
+        "nonterminal",
+        "false-nonterminal",
+        "duplicate",
+        "zero-initial",
+        "zero-current",
+        "foreign-sandbox",
+        "abandoned",
+        "fenced",
+        "complete-pending",
+        "too-many",
+        "missing-created",
+    ],
+)
 def test_contradictory_reply_refused_through_public_get(connection, fault):
     client, state = connection
     r = state.response
@@ -230,7 +292,10 @@ def test_exact_uint64_and_nanosecond_fields(connection):
     result = client.get("workspace-a", key())
     assert result.revision == 2**64 - 1
     assert result.bindings[0].initial_resource_version == 2**64 - 1
-    assert result.created_at.seconds == -62135596800 and result.created_at.nanos == 999999999
+    assert (
+        result.created_at.seconds == -62135596800
+        and result.created_at.nanos == 999999999
+    )
 
 
 def test_invalid_keys_make_no_rpc(connection):
@@ -254,22 +319,35 @@ def test_invalid_timeout_refuses_before_health(connection):
             CreateOwnershipClient(client._channel, timeout=value)
     assert state.health == 0
 
+
 # The public canonical builder feeds the actual generated receipt request.
 # The stand-in does not qualify server storage/authorization or a live gateway.
 
-VECTORS = json.loads((Path(__file__).parents[2] / "proto/create_fingerprint.v1.json").read_text())
+VECTORS = json.loads(
+    (Path(__file__).parents[2] / "proto/create_fingerprint.v1.json").read_text()
+)
 
 
-@pytest.mark.parametrize("vector", [
-    v for v in VECTORS["vectors"] if v["message_type"] == "openshell.v1.CreateSandboxRequest"
-], ids=lambda v: v["name"])
+@pytest.mark.parametrize(
+    "vector",
+    [
+        v
+        for v in VECTORS["vectors"]
+        if v["message_type"] == "openshell.v1.CreateSandboxRequest"
+    ],
+    ids=lambda v: v["name"],
+)
 def test_public_canonical_key_reaches_generated_receipt_transport(connection, vector):
     client, state = connection
     message = json_format.ParseDict(vector["input"], pb.CreateSandboxRequest())
-    message.ParseFromString(message.SerializeToString() + bytes.fromhex(vector["unknown_wire_hex"]))
+    message.ParseFromString(
+        message.SerializeToString() + bytes.fromhex(vector["unknown_wire_hex"])
+    )
     message.request_id = REQUEST
     original = message.SerializeToString()
-    built = create_ownership_key_from_request(original, VECTORS["fingerprint_schema_digest"])
+    built = create_ownership_key_from_request(
+        original, VECTORS["fingerprint_schema_digest"]
+    )
     assert built.fingerprint.hex() == vector["sha256"]
     state.response.fingerprint = built.fingerprint
     state.response.fingerprint_schema_digest = built.schema_digest
@@ -280,12 +358,15 @@ def test_public_canonical_key_reaches_generated_receipt_transport(connection, ve
     assert not state.fences and len(state.reads) == 1
 
 
-@pytest.mark.parametrize("code", [
-    grpc.StatusCode.PERMISSION_DENIED,
-    grpc.StatusCode.UNAUTHENTICATED,
-    grpc.StatusCode.CANCELLED,
-    grpc.StatusCode.DEADLINE_EXCEEDED,
-])
+@pytest.mark.parametrize(
+    "code",
+    [
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNAUTHENTICATED,
+        grpc.StatusCode.CANCELLED,
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+    ],
+)
 def test_transport_denial_and_cancellation_never_fall_back_or_retry(connection, code):
     client, state = connection
     state.code = code

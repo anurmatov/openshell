@@ -181,8 +181,14 @@ records, exact integer/timestamp values and original-key/terminal-effect refusal
 Its owned generated-gRPC tests connect the public canonical key builder to receipt
 reads across the shared Create vectors; missing capability and transport failures
 never retry or downgrade. These tests are not wheel or installed-runtime proof.
-Trusted observations, snapshots, retained journals and remaining connected
-cross-SDK/native consumer oracles remain incomplete.
+The network runtime now owns a PID-bound, read-only local process/socket collector:
+it scans all matching PID/net namespace members rather than only descendants,
+uses boot/PID/start-time/namespace/executable identities, and rejects changed
+two-scan inventories, missing procfs data and unowned TCP/UDP sockets.
+It reuses the actual procfs IPv4/IPv6 tuple parser and exposes facts only, not
+qualified report trust, immutable snapshot pages, poller/broker absence or cleanup
+authority; protected report/session integration and retained journals remain
+incomplete alongside remaining connected cross-SDK/native consumer oracles.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and

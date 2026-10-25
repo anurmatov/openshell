@@ -68,7 +68,7 @@ impl std::fmt::Display for WorkloadProxyTcpConnection {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProcTcpAddressFamily {
+pub(crate) enum ProcTcpAddressFamily {
     Ipv4,
     Ipv6,
 }
@@ -393,7 +393,10 @@ fn find_proc_net_tcp_inode(
 }
 
 #[cfg(target_os = "linux")]
-fn parse_proc_socket_addr(value: &str, address_family: ProcTcpAddressFamily) -> Option<SocketAddr> {
+pub(crate) fn parse_proc_socket_addr(
+    value: &str,
+    address_family: ProcTcpAddressFamily,
+) -> Option<SocketAddr> {
     let (address, port) = value.rsplit_once(':')?;
     let port = u16::from_str_radix(port, 16).ok()?;
 

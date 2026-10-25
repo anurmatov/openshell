@@ -16,6 +16,7 @@ from .errors import _error_mapping_channel
 
 if TYPE_CHECKING:
     import grpc
+
     from .sandbox import SandboxClient
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -82,15 +83,21 @@ class CreateOwnershipReceipt:
 
 def _uuid(value: str) -> bool:
     return (
-        isinstance(value, str) and _UUID.fullmatch(value) is not None
+        isinstance(value, str)
+        and _UUID.fullmatch(value) is not None
         and value != "00000000-0000-0000-0000-000000000000"
     )
 
 
-def _freeze(workspace: str, key: CreateOwnershipKey, expected: str | None) -> CreateOwnershipKey:
+def _freeze(
+    workspace: str, key: CreateOwnershipKey, expected: str | None
+) -> CreateOwnershipKey:
     if (
-        not isinstance(workspace, str) or not workspace or workspace.strip() != workspace
-        or workspace == "*" or not _uuid(key.request_id)
+        not isinstance(workspace, str)
+        or not workspace
+        or workspace.strip() != workspace
+        or workspace == "*"
+        or not _uuid(key.request_id)
         or not isinstance(key.fingerprint, (bytes, bytearray, memoryview))
         or not isinstance(key.schema_digest, str)
         or re.fullmatch(r"[0-9a-f]{64}", key.schema_digest) is None
@@ -105,20 +112,30 @@ def _freeze(workspace: str, key: CreateOwnershipKey, expected: str | None) -> Cr
 
 def _decode(r, key: CreateOwnershipKey, expected: str | None) -> CreateOwnershipReceipt:
     if (
-        r is None or r.request_id != key.request_id or bytes(r.fingerprint) != key.fingerprint
-        or r.fingerprint_schema_digest != key.schema_digest or not 1 <= r.receipt_state <= 9
-        or len(r.bindings) > 16 or not r.coverage_epoch
+        r is None
+        or r.request_id != key.request_id
+        or bytes(r.fingerprint) != key.fingerprint
+        or r.fingerprint_schema_digest != key.schema_digest
+        or not 1 <= r.receipt_state <= 9
+        or len(r.bindings) > 16
+        or not r.coverage_epoch
     ):
         raise ValueError(_INVALID)
     state = CreateReceiptState(r.receipt_state)
     completed = r.HasField("completed_at")
     if (
         (r.complete and state not in (2, 4, 8))
-        or (state == 8 and (not r.admission_closed or r.fence_revision == 0 or r.bindings))
+        or (
+            state == 8
+            and (not r.admission_closed or r.fence_revision == 0 or r.bindings)
+        )
         or (state == 9 and (not r.admission_closed or r.fence_revision == 0))
         or (state == 4 and (not r.admission_closed or not completed or r.bindings))
         or (state in (2, 5) and (not completed or len(r.bindings) != 1))
-        or (state not in (6, 7) and (r.receipt_revision == 0 or not r.HasField("created_at")))
+        or (
+            state not in (6, 7)
+            and (r.receipt_revision == 0 or not r.HasField("created_at"))
+        )
     ):
         raise ValueError(_INVALID)
 
@@ -126,7 +143,10 @@ def _decode(r, key: CreateOwnershipKey, expected: str | None) -> CreateOwnership
         if not r.HasField(name):
             return None
         value = getattr(r, name)
-        if not -62135596800 <= value.seconds <= 253402300799 or not 0 <= value.nanos < 1_000_000_000:
+        if (
+            not -62135596800 <= value.seconds <= 253402300799
+            or not 0 <= value.nanos < 1_000_000_000
+        ):
             raise ValueError(_INVALID)
         return OwnershipTimestamp(value.seconds, value.nanos)
 
@@ -134,27 +154,52 @@ def _decode(r, key: CreateOwnershipKey, expected: str | None) -> CreateOwnership
     seen = set()
     matched = expected is None or state in (6, 7)
     for b in r.bindings:
-        current = b.current_resource_version if b.HasField("current_resource_version") else None
+        current = (
+            b.current_resource_version
+            if b.HasField("current_resource_version")
+            else None
+        )
         if (
-            not _uuid(b.sandbox_id) or not _uuid(b.claim_incarnation_id)
-            or b.initial_resource_version == 0 or b.binding_revision == 0 or current == 0
-            or not 1 <= b.effect_state <= 4 or b.sandbox_id in seen
+            not _uuid(b.sandbox_id)
+            or not _uuid(b.claim_incarnation_id)
+            or b.initial_resource_version == 0
+            or b.binding_revision == 0
+            or current == 0
+            or not 1 <= b.effect_state <= 4
+            or b.sandbox_id in seen
             or (b.effect_state == 4) != completed
         ):
             raise ValueError(_INVALID)
         seen.add(b.sandbox_id)
         matched = matched or b.sandbox_id == expected
-        bindings.append(CreateOwnershipBinding(
-            b.claim_incarnation_id, b.sandbox_id, b.initial_resource_version,
-            current, b.current_state, CreateEffectState(b.effect_state), b.binding_revision,
-        ))
+        bindings.append(
+            CreateOwnershipBinding(
+                b.claim_incarnation_id,
+                b.sandbox_id,
+                b.initial_resource_version,
+                current,
+                b.current_state,
+                CreateEffectState(b.effect_state),
+                b.binding_revision,
+            )
+        )
     if not matched:
         raise ValueError(_INVALID)
     return CreateOwnershipReceipt(
-        state, r.request_id, bytes(r.fingerprint), r.fingerprint_schema_digest,
-        r.receipt_revision, timestamp("created_at"), timestamp("completed_at"),
-        timestamp("expires_at"), r.coverage_epoch, tuple(bindings), r.complete,
-        r.fence_revision, r.admission_closed, r.reason_code,
+        state,
+        r.request_id,
+        bytes(r.fingerprint),
+        r.fingerprint_schema_digest,
+        r.receipt_revision,
+        timestamp("created_at"),
+        timestamp("completed_at"),
+        timestamp("expires_at"),
+        r.coverage_epoch,
+        tuple(bindings),
+        r.complete,
+        r.fence_revision,
+        r.admission_closed,
+        r.reason_code,
     )
 
 
@@ -185,20 +230,28 @@ class CreateOwnershipClient:
             raise ValueError("gateway capability sandbox-create-ownership-v1 required")
 
     def get(
-        self, workspace: str, key: CreateOwnershipKey, *, expected_sandbox_id: str | None = None,
+        self,
+        workspace: str,
+        key: CreateOwnershipKey,
+        *,
+        expected_sandbox_id: str | None = None,
     ) -> CreateOwnershipReceipt:
         """Send one SELECT-only receipt read; missing/expired evidence never fences."""
         original = _freeze(workspace, key, expected_sandbox_id)
         self._require_capability()
         request = openshell_pb2.GetSandboxCreateReceiptRequest(
             workspace_scope=datamodel_pb2.WorkspaceSelector(workspace=workspace),
-            request_id=original.request_id, payload_fingerprint=original.fingerprint,
+            request_id=original.request_id,
+            payload_fingerprint=original.fingerprint,
             fingerprint_schema_digest=original.schema_digest,
         )
         if expected_sandbox_id is not None:
             request.expected_sandbox_id = expected_sandbox_id
-        return _decode(self._stub.GetSandboxCreateReceipt(request, timeout=self._timeout),
-                       original, expected_sandbox_id)
+        return _decode(
+            self._stub.GetSandboxCreateReceipt(request, timeout=self._timeout),
+            original,
+            expected_sandbox_id,
+        )
 
     def fence(self, workspace: str, key: CreateOwnershipKey) -> CreateOwnershipReceipt:
         """Explicit metadata mutation, not cancellation or runtime absence.
@@ -210,11 +263,15 @@ class CreateOwnershipClient:
         response = self._stub.FenceSandboxCreate(
             openshell_pb2.FenceSandboxCreateRequest(
                 workspace_scope=datamodel_pb2.WorkspaceSelector(workspace=workspace),
-                request_id=original.request_id, payload_fingerprint=original.fingerprint,
+                request_id=original.request_id,
+                payload_fingerprint=original.fingerprint,
                 fingerprint_schema_digest=original.schema_digest,
-            ), timeout=self._timeout,
+            ),
+            timeout=self._timeout,
         )
-        result = _decode(response.receipt if response.HasField("receipt") else None, original, None)
+        result = _decode(
+            response.receipt if response.HasField("receipt") else None, original, None
+        )
         if not result.admission_closed or result.fence_revision == 0:
             raise ValueError("Create fence was not confirmed closed")
         return result
