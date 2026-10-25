@@ -156,13 +156,7 @@ pub(super) async fn run<M: Mutation>(
     }
     let request_id = validate_request_id(request.get_ref().request_id())?;
     let principal = super::extract_principal(&request)?;
-    let Some(identity) = principal.user_identity() else {
-        return Err(crate::auth::audit::deny(
-            &principal,
-            crate::auth::audit::AuthzDenial::MethodNotPermitted,
-            "request admission requires a user principal",
-        ));
-    };
+    let caller = authenticated_caller_hash(state, &principal)?;
     let scope = original.authorize(state, &principal).await?;
     #[cfg(test)]
     if let Some(barrier) = request.extensions().get::<Arc<AuthorizationBarrier>>() {
@@ -170,12 +164,29 @@ pub(super) async fn run<M: Mutation>(
         barrier.resume.notified().await;
     }
     let effective_scope = request.get_ref().authorize(state, &principal).await?;
+    if M::METHOD == "CreateSandbox" && scope.workspace_id != effective_scope.workspace_id {
+        return Err(replay_unavailable());
+    }
     if original.target_selector().is_some()
         && original.target_selector() == request.get_ref().target_selector()
         && (scope.workspace_id != effective_scope.workspace_id
             || scope.target_id != effective_scope.target_id)
     {
         return Err(replay_unavailable());
+    }
+    // A retained audited UUID is not a legacy replay candidate, including after
+    // the replay cache was pruned. Repeat this inside atomic admission too.
+    if M::METHOD == "CreateSandbox" {
+        state
+            .store
+            .create_receipt_ledger()
+            .guard_legacy(&super::create_receipt::ReceiptKey {
+                caller_hash: caller.clone(),
+                workspace_id: scope.workspace_id.clone().ok_or_else(uncertain)?,
+                request_uuid: request_id.clone(),
+            })
+            .await
+            .map_err(create_guard_error)?;
     }
     let (payload_hash, protection) = if M::PROTECTED {
         let key = fingerprint_key(state).await?;
@@ -191,27 +202,6 @@ pub(super) async fn run<M: Mutation>(
     } else {
         (fingerprint(original)?, None)
     };
-    let (provider, issuer) = match identity.provider {
-        IdentityProvider::Oidc => (
-            "oidc",
-            state
-                .config
-                .oidc
-                .as_ref()
-                .map_or("", |config| config.issuer.as_str()),
-        ),
-        IdentityProvider::Mtls => (
-            if matches!(principal, Principal::Operator(_)) {
-                "mtls-operator"
-            } else {
-                "mtls"
-            },
-            "",
-        ),
-        IdentityProvider::CloudflareAccess => ("cloudflare_access", ""),
-        IdentityProvider::LocalDev => ("local_dev", ""),
-    };
-    let caller = hash_json(&serde_json::json!([provider, issuer, identity.subject,]))?;
     // Not a valid user workspace name; ordinary workspace cleanup cannot touch
     // these records. The bucket supports an atomic per-caller storage quota.
     let bucket = format!("_mutation/{caller}");
@@ -255,6 +245,18 @@ async fn execute_owned<M: Mutation>(
     protection: Option<Protection>,
     scope: Scope,
 ) -> Result<Response<M::Output>, Status> {
+    let create_key = if M::METHOD == "CreateSandbox" {
+        Some(super::create_receipt::ReceiptKey {
+            caller_hash: bucket
+                .strip_prefix("_mutation/")
+                .ok_or_else(uncertain)?
+                .into(),
+            workspace_id: scope.workspace_id.clone().ok_or_else(uncertain)?,
+            request_uuid: validate_request_id(request.get_ref().request_id())?,
+        })
+    } else {
+        None
+    };
     let admission = Admission {
         format_version: 1,
         payload_hash,
@@ -266,6 +268,14 @@ async fn execute_owned<M: Mutation>(
     };
     // Contention is bounded. Losing a race never authorizes execution.
     for _ in 0..8 {
+        if let Some(key) = create_key.as_ref() {
+            state
+                .store
+                .create_receipt_ledger()
+                .guard_legacy(key)
+                .await
+                .map_err(create_guard_error)?;
+        }
         if let Some(row) = state
             .store
             .get_by_name(OBJECT_TYPE, bucket, key)
@@ -323,18 +333,38 @@ async fn execute_owned<M: Mutation>(
         // A new incarnation needs a new row ID. Versions reset after deletion;
         // an expiry cleaner holding an old snapshot must not delete a new claim.
         let claim_id = uuid::Uuid::new_v4().to_string();
-        let write = state
-            .store
-            .create_if_workspace_count_below(
-                OBJECT_TYPE,
-                &claim_id,
-                key,
-                bucket,
-                &payload,
-                None,
-                u64::from(MAX_ADMISSIONS_PER_CALLER),
-            )
-            .await;
+        let write = if let Some(create_key) = create_key.as_ref() {
+            use super::create_receipt::LegacyReservation;
+            let now_ms = current_time_ms();
+            match state
+                .store
+                .create_receipt_ledger()
+                .reserve_legacy(create_key, &claim_id, key, &payload, now_ms)
+                .await
+                .map_err(create_guard_error)?
+            {
+                LegacyReservation::Created => Ok(Some(crate::persistence::WriteResult {
+                    resource_version: 1,
+                    created_at_ms: now_ms,
+                    updated_at_ms: now_ms,
+                })),
+                LegacyReservation::Contended => continue,
+                LegacyReservation::Full => Ok(None),
+            }
+        } else {
+            state
+                .store
+                .create_if_workspace_count_below(
+                    OBJECT_TYPE,
+                    &claim_id,
+                    key,
+                    bucket,
+                    &payload,
+                    None,
+                    u64::from(MAX_ADMISSIONS_PER_CALLER),
+                )
+                .await
+        };
         let version = match write {
             Ok(Some(write)) => write.resource_version,
             Ok(None) => {
@@ -433,7 +463,15 @@ impl Completion {
     }
 }
 
-async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
+pub(super) async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
+    prune_expired_at(store, bucket, current_time_ms()).await
+}
+
+pub(super) async fn prune_expired_at(
+    store: &Store,
+    bucket: &str,
+    now_ms: i64,
+) -> Result<bool, Status> {
     // The bucket is atomically bounded, so this scan cannot grow without limit.
     let rows = store
         .list(OBJECT_TYPE, bucket, MAX_ADMISSIONS_PER_CALLER, 0)
@@ -444,11 +482,22 @@ async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
         let Ok(admission) = serde_json::from_slice::<Admission>(&row.payload) else {
             continue;
         };
-        if admission.format_version == 1
-            && admission.success.is_some()
-            && admission.completed_at_ms.is_some_and(|completed| {
-                current_time_ms() >= completed.saturating_add(SUCCESS_TTL_MS)
-            })
+        let finalized = if admission.format_version == 1 {
+            admission.success.is_some()
+        } else if admission.format_version == 2 && admission.completed_at_ms.is_some() {
+            store
+                .create_receipt_ledger()
+                .terminal_claim_completed_at(&row.id)
+                .await
+                .map_err(create_guard_error)?
+                == admission.completed_at_ms
+        } else {
+            false
+        };
+        if finalized
+            && admission
+                .completed_at_ms
+                .is_some_and(|completed| now_ms >= completed.saturating_add(SUCCESS_TTL_MS))
         {
             match store
                 .delete_if(OBJECT_TYPE, &row.id, row.resource_version)
@@ -463,7 +512,7 @@ async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
     Ok(removed)
 }
 
-fn validate_request_id(value: &str) -> Result<String, Status> {
+pub(super) fn validate_request_id(value: &str) -> Result<String, Status> {
     let invalid = || {
         rpc_error::invalid_argument(
             "request_id",
@@ -827,3 +876,62 @@ mod tests;
 
 pub(super) mod ordinary;
 pub(super) mod streaming;
+
+fn create_guard_error(error: super::create_receipt::LedgerError) -> Status {
+    match error {
+        super::create_receipt::LedgerError::Fenced => rpc_error::failed_precondition(
+            "REQUEST_ID_FENCED",
+            "the original Create request is permanently fenced",
+        ),
+        super::create_receipt::LedgerError::Pending => uncertain(),
+        _ => Status::unavailable("create ownership admission guard unavailable"),
+    }
+}
+
+/// Caller authority is gateway-established identity, never a request body field.
+pub(super) fn authenticated_caller_hash(
+    state: &ServerState,
+    principal: &Principal,
+) -> Result<String, Status> {
+    let Some(identity) = principal.user_identity() else {
+        return Err(crate::auth::audit::deny(
+            &principal,
+            crate::auth::audit::AuthzDenial::MethodNotPermitted,
+            "request admission requires a user principal",
+        ));
+    };
+    let (provider, issuer) = match identity.provider {
+        IdentityProvider::Oidc => (
+            "oidc",
+            state
+                .config
+                .oidc
+                .as_ref()
+                .map_or("", |config| config.issuer.as_str()),
+        ),
+        IdentityProvider::Mtls => (
+            if matches!(principal, Principal::Operator(_)) {
+                "mtls-operator"
+            } else {
+                "mtls"
+            },
+            "",
+        ),
+        IdentityProvider::CloudflareAccess => ("cloudflare_access", ""),
+        IdentityProvider::LocalDev => ("local_dev", ""),
+    };
+    hash_json(&serde_json::json!([provider, issuer, identity.subject,]))
+}
+
+pub(super) fn create_mutation_key(
+    caller: &str,
+    workspace: &str,
+    request_id: &str,
+) -> Result<String, Status> {
+    hash_json(&serde_json::json!([
+        caller,
+        "CreateSandbox",
+        workspace,
+        request_id
+    ]))
+}

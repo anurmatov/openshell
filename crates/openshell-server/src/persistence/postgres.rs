@@ -276,6 +276,10 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 pub const MIN_MAX_CONNECTIONS: u32 = 2;
 
 impl PostgresStore {
+    pub(crate) fn create_receipt_ledger(&self) -> crate::grpc::create_receipt::CreateReceiptLedger {
+        crate::grpc::create_receipt::CreateReceiptLedger::Postgres(self.pool.clone())
+    }
+
     /// Connect and size the data and lock pools, falling back to
     /// [`DEFAULT_MAX_CONNECTIONS`] and `MUTATION_LOCK_POOL_MAX_CONNECTIONS`.
     pub async fn connect(
@@ -348,10 +352,19 @@ impl PostgresStore {
     }
 
     pub async fn migrate(&self) -> PersistenceResult<()> {
+        let previously_initialized: bool =
+            sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| map_db_error(&e))?;
         POSTGRES_MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|e| map_migrate_error(&e))?;
+        self.create_receipt_ledger()
+            .initialize_coverage(!previously_initialized)
+            .await
+            .map_err(|_| PersistenceError::Migration("initialize create coverage".into()))?;
         self.migrate_legacy_time_payloads().await
     }
 

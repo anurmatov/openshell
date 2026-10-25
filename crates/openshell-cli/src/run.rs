@@ -672,6 +672,7 @@ pub async fn sandbox_create(
         );
     }
     let request = CreateSandboxRequest {
+        require_ownership_receipt: false,
         request_id: String::new(),
         spec: Some(SandboxSpec {
             resource_requirements,

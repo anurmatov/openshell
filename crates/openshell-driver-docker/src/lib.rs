@@ -7,6 +7,7 @@
 
 mod isolation;
 pub mod otel_tracing;
+mod ownership_journal;
 
 use bollard::Docker;
 use bollard::errors::Error as BollardError;
@@ -1790,6 +1791,14 @@ impl DockerComputeDriver {
                 ));
             }
         };
+        record_ownership_event(
+            &sandbox.id,
+            &self.config,
+            ownership_journal::Event {
+                kind: ownership_journal::EventKind::ComponentCreated,
+                component_id: Some(created.id.clone()),
+            },
+        );
         let inspected = match self.docker.inspect_container(&created.id, None).await {
             Ok(inspected) => inspected,
             Err(error) => {
@@ -2456,6 +2465,11 @@ impl DockerComputeDriver {
             generation_id.to_string(),
         )
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        record_ownership_event(
+            sandbox_id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::StartAttempt),
+        );
         self.lifecycle_event_fences
             .clear_stop(sandbox_id, sandbox_name);
         self.lifecycle_event_fences.begin_start(sandbox_id);
@@ -3369,6 +3383,11 @@ impl ComputeDriver for DockerComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
+        record_ownership_event(
+            &sandbox.id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::CreateAttempt),
+        );
         self.create_sandbox_inner(&sandbox).await?;
         span_status.finish(Ok(Response::new(CreateSandboxResponse::default())))
     }
@@ -3391,6 +3410,11 @@ impl ComputeDriver for DockerComputeDriver {
         let request = request.into_inner();
         require_sandbox_identifier(&request.sandbox_id, &request.name)?;
 
+        record_ownership_event(
+            &request.sandbox_id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::StopAttempt),
+        );
         self.lifecycle_event_fences
             .request_stop(&request.sandbox_id, &request.name);
         if let Err(error) = self
@@ -3409,6 +3433,11 @@ impl ComputeDriver for DockerComputeDriver {
                 .clear_stop(&request.sandbox_id, &request.name);
             return Err(error);
         }
+        record_ownership_event(
+            &request.sandbox_id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::StopReturned),
+        );
         span_status.finish(Ok(Response::new(StopSandboxResponse {})))
     }
 
@@ -3451,10 +3480,20 @@ impl ComputeDriver for DockerComputeDriver {
         let request = request.into_inner();
         require_sandbox_identifier(&request.sandbox_id, &request.name)?;
 
+        record_ownership_event(
+            &request.sandbox_id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::DeleteAttempt),
+        );
         let event_sandbox_id = request.sandbox_id.clone();
         let deleted = self
             .delete_sandbox_inner(&request.sandbox_id, &request.name)
             .await?;
+        record_ownership_event(
+            &request.sandbox_id,
+            &self.config,
+            ownership_journal::Event::new(ownership_journal::EventKind::DeleteReturned),
+        );
         self.lifecycle_event_fences
             .remove(&event_sandbox_id, &request.name);
         if deleted && !event_sandbox_id.is_empty() {
@@ -5775,6 +5814,34 @@ async fn stop_docker_control_process(mut process: DockerControlProcess) {
         let _ = shutdown.send(());
     }
     let _ = process.task.await;
+}
+
+/// Partial legacy attempt history, outside the directory removed by boundary cleanup.
+/// Failed capture never qualifies evidence and does not change legacy lifecycle results.
+/// Audited traffic stays unsupported until complete manifest/task/engine fencing exists.
+fn record_ownership_event(
+    sandbox_id: &str,
+    config: &DockerDriverRuntimeConfig,
+    event: ownership_journal::Event,
+) {
+    let result = openshell_core::driver_utils::sandbox_token_path(
+        "docker-ownership-evidence",
+        Some(&config.sandbox_namespace),
+        sandbox_id,
+    )
+    .ok()
+    .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    .ok_or(ownership_journal::JournalError::Unavailable)
+    .and_then(|directory| {
+        ownership_journal::append_at(&directory, &config.sandbox_namespace, sandbox_id, event)
+    });
+    if result.is_err() {
+        // No raw path, token, operation body or unvalidated identifier is emitted.
+        warn!(
+            reason_code = "OWNERSHIP_JOURNAL_UNQUALIFIED",
+            "Docker ownership attempt evidence unavailable"
+        );
+    }
 }
 
 fn cleanup_docker_boundary_state(sandbox: &DriverSandbox, config: &DockerDriverRuntimeConfig) {

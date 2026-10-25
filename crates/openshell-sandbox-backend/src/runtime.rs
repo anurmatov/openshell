@@ -595,6 +595,13 @@ pub struct RunningBoundary {
 }
 
 impl RunningBoundary {
+    /// One bounded authenticated read, without recovery/retry or lifecycle effects.
+    /// The caller still has to qualify placement, installed policy and freshness.
+    pub async fn observe_ownership(
+        &self,
+    ) -> Result<crate::boundary_protocol::OwnershipInventoryWire, BackendError> {
+        self.process.observe_ownership().await
+    }
     pub fn agent(&self) -> Arc<BoundaryProcess> {
         self.process.clone()
     }
@@ -624,6 +631,33 @@ pub struct BoundaryProcess {
 }
 
 impl BoundaryProcess {
+    pub async fn observe_ownership(
+        &self,
+    ) -> Result<crate::boundary_protocol::OwnershipInventoryWire, BackendError> {
+        let request = BoundaryClient::prepare_request(Request::ObserveOwnership)?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.client.read_current_inventory(&request),
+        )
+        .await
+        .map_err(|_| BackendError::Unavailable("ownership inventory timed out".into()))??;
+        let Response::OwnershipInventory { inventory } = response else {
+            return Err(unexpected_response("ownership_inventory", &response));
+        };
+        let installed_policy_matches = self.client.attach_request.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref().is_some_and(|attached| matches!(&attached.request,
+                Request::Attach { policy, .. } if policy.as_ref() == inventory.installed_policy.as_ref()));
+        if inventory.process_id != self.process_id
+            || inventory.generation != self.client.runtime_descriptor.generation
+            || !installed_policy_matches
+        {
+            return Err(BackendError::Unavailable(
+                "ownership process, generation or installed policy replaced".into(),
+            ));
+        }
+        Ok(*inventory)
+    }
     pub async fn attach(&self) -> Result<ProcessAttachment, BackendError> {
         open_process_attachment(self.client.clone(), self.process_id.clone()).await
     }
@@ -1343,6 +1377,70 @@ impl BoundaryCredential {
 }
 
 impl BoundaryClient {
+    /// Never renew, probe with Confirm, reconnect, or replay lifecycle state.
+    /// Use the already authenticated channel and one captured header, then
+    /// reject a changed credential/channel before publishing any returned facts.
+    async fn read_current_inventory(
+        &self,
+        request: &RequestEnvelope,
+    ) -> Result<Response, BackendError> {
+        let unavailable =
+            || BackendError::Unavailable("ownership current session unavailable or changed".into());
+        if !matches!(request.request, Request::ObserveOwnership) {
+            return Err(unavailable());
+        }
+        let _stable_connection = self.reconnect.try_lock().map_err(|_| unavailable())?;
+        let credential = BoundaryCredential::capture(&self.sandbox_bearer)?;
+        let cached = self
+            .grpc_channel
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(unavailable)?;
+        let matches_credential = |channel: &CachedGrpcChannel| {
+            !channel.transport.is_aborted()
+                && channel.credential_epoch == credential.epoch
+                && channel.bearer_fingerprint == credential.fingerprint
+        };
+        if !matches_credential(&cached)
+            || self
+                .attach_request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            || self
+                .confirm_request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            return Err(unavailable());
+        }
+        // Deliberately bypass open_grpc_stream/open_exchange_envelope, whose
+        // legitimate mutation recovery must remain available to other callers.
+        let response = self
+            .exchange_on_channel(cached.channel.clone(), request, &credential)
+            .await?;
+        let current = BoundaryCredential::capture(&self.sandbox_bearer)?;
+        let unchanged = self
+            .grpc_channel
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|channel| {
+                matches_credential(channel)
+                    && channel.generation == cached.generation
+                    && Arc::ptr_eq(&channel.transport, &cached.transport)
+            });
+        if !unchanged
+            || current.epoch != credential.epoch
+            || current.fingerprint != credential.fingerprint
+        {
+            return Err(unavailable());
+        }
+        Ok(response)
+    }
+
     async fn discover_policy(&self) -> Result<(Option<String>, bool), BackendError> {
         match self.call_idempotent(Request::DiscoverPolicy).await? {
             Response::ImagePolicy { yaml, invalid } => Ok((yaml, invalid)),
@@ -2804,6 +2902,10 @@ mod tests {
                     match encode_frame(&ResponseEnvelope {
                         request_id: envelope.request_id,
                         response: match envelope.request {
+                            Request::ObserveOwnership => Response::Error {
+                                kind: crate::boundary_protocol::BoundaryErrorKind::Unavailable,
+                                message: "synthetic ownership source unavailable".to_string(),
+                            },
                             Request::DiscoverPolicy => Response::ImagePolicy {
                                 yaml: None,
                                 invalid: false,
@@ -2985,6 +3087,226 @@ mod tests {
             assert!(matches!(
                 client.mediation_session().await,
                 Err(BackendError::Denied(_))
+            ));
+            assert_eq!(requests.load(Ordering::Acquire), expected_requests);
+            assert!(client.mediation.lock().await.is_none());
+        }
+        server.abort();
+    }
+
+    // The production read must not use credential renewal or channel recovery.
+    // This TLS fixture accepts the changed credential, so unintended Confirm or
+    // Attach replay is counted rather than hidden by an authentication failure.
+    async fn assert_inventory_drift_has_no_lifecycle_requests(case: &str) {
+        let certificate = test_certificate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server_opens = opens.clone();
+        let tls = certificate.server_config.clone();
+        let expected_token = if matches!(case, "fingerprint" | "epoch") {
+            "b"
+        } else {
+            "a"
+        }
+        .repeat(32);
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let stream = tokio_rustls::TlsAcceptor::from(tls.clone())
+                    .accept(stream)
+                    .await
+                    .unwrap();
+                let service = TestGrpcBoundary {
+                    wait_for_half_close: false,
+                    expected_token: expected_token.clone(),
+                    requests: server_requests.clone(),
+                    mediation_failures: Arc::default(),
+                    mediation_ready: false,
+                    provider_environment_generation: 0,
+                    confirmation: test_confirmation(),
+                };
+                let backend = TestIsolationBackend {
+                    opens: server_opens.clone(),
+                    ..Default::default()
+                };
+                connections.spawn(async move {
+                    let _ = tonic::transport::Server::builder()
+                        .add_service(IsolationBackendServer::new(backend))
+                        .add_service(SandboxProtocolServer::new(service))
+                        .serve_with_incoming(tokio_stream::iter([Ok::<_, std::io::Error>(
+                            TestTlsIo(Box::new(stream)),
+                        )]))
+                        .await;
+                });
+            }
+        });
+        let client = Arc::new(BoundaryClient::new(
+            tls_runtime_descriptor(address, certificate.client_tls),
+            test_bearer(&"a".repeat(32)),
+        ));
+        let credential = BoundaryCredential::capture(&client.sandbox_bearer).unwrap();
+        let (channel, transport) = client.build_grpc_channel(&credential).await.unwrap();
+        *client.grpc_channel.lock().await = Some(CachedGrpcChannel {
+            credential_epoch: credential.epoch,
+            bearer_fingerprint: credential.fingerprint,
+            generation: 1,
+            channel,
+            transport: transport.clone(),
+        });
+        *client.attach_request.lock().unwrap() = Some(
+            RequestEnvelope::new(Request::Attach {
+                supervisor_instance_id: client.supervisor_instance_id,
+                policy: Box::new(SandboxPolicyWire::from(sandbox().policy)),
+            })
+            .unwrap(),
+        );
+        *client.confirm_request.lock().unwrap() =
+            Some(RequestEnvelope::new(Request::Confirm).unwrap());
+        match case {
+            "fingerprint" | "epoch" => client
+                .sandbox_bearer
+                .update(
+                    SecretJwt::parse("b".repeat(32)).unwrap(),
+                    i64::MAX,
+                    openshell_core::jwt::CredentialEpoch::new(if case == "epoch" { 2 } else { 1 })
+                        .unwrap(),
+                )
+                .unwrap(),
+            "missing_credential" => client.sandbox_bearer.clear(),
+            "expired" => client
+                .sandbox_bearer
+                .update(
+                    SecretJwt::parse("a".repeat(32)).unwrap(),
+                    1,
+                    credential.epoch,
+                )
+                .unwrap(),
+            "aborted" => transport.abort(),
+            "missing_channel" => {
+                *client.grpc_channel.lock().await = None;
+            }
+            "unconfirmed" => {
+                *client.confirm_request.lock().unwrap() = None;
+            }
+            _ => panic!("unknown synthetic case"),
+        }
+        let before_opens = opens.load(Ordering::Acquire);
+        let process = BoundaryProcess {
+            exec: false,
+            client: client.clone(),
+            process_id: "test-generation:main:0".into(),
+        };
+        assert!(matches!(
+            process.observe_ownership().await,
+            Err(BackendError::Unavailable(_))
+        ));
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            0,
+            "{case}: read emitted control/lifecycle requests"
+        );
+        assert_eq!(
+            opens.load(Ordering::Acquire),
+            before_opens,
+            "{case}: read opened a new boundary"
+        );
+        assert!(client.mediation.lock().await.is_none());
+        transport.abort();
+        server.abort();
+        let _ = server.await;
+    }
+    #[tokio::test]
+    async fn ownership_inventory_fingerprint_change_has_zero_lifecycle_requests() {
+        assert_inventory_drift_has_no_lifecycle_requests("fingerprint").await;
+    }
+    #[tokio::test]
+    async fn ownership_inventory_epoch_change_has_zero_lifecycle_requests() {
+        assert_inventory_drift_has_no_lifecycle_requests("epoch").await;
+    }
+    #[tokio::test]
+    async fn ownership_inventory_absent_expired_dead_or_unconfirmed_session_refuses() {
+        for case in [
+            "missing_credential",
+            "expired",
+            "aborted",
+            "missing_channel",
+            "unconfirmed",
+        ] {
+            assert_inventory_drift_has_no_lifecycle_requests(case).await;
+        }
+    }
+    #[tokio::test]
+    async fn ownership_inventory_actual_rpc_refusal_is_not_retried() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = TestGrpcBoundary {
+            wait_for_half_close: false,
+            expected_token: "a".repeat(32),
+            requests: requests.clone(),
+            mediation_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            mediation_ready: false,
+            provider_environment_generation: 0,
+            confirmation: test_confirmation(),
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tonic::transport::Server::builder()
+                .add_service(IsolationBackendServer::new(TestIsolationBackend::default()))
+                .add_service(SandboxProtocolServer::new(service))
+                .serve_with_incoming(tokio_stream::iter([Ok::<_, std::io::Error>(stream)]))
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = Arc::new(BoundaryClient::new(
+            tls_runtime_descriptor(address, test_certificate().client_tls),
+            test_bearer(&"a".repeat(32)),
+        ));
+        client
+            .open_boundary(
+                channel.clone(),
+                &BoundaryCredential::capture(&client.sandbox_bearer).unwrap(),
+            )
+            .await
+            .unwrap();
+        *client.grpc_channel.lock().await = Some(CachedGrpcChannel {
+            credential_epoch: openshell_core::jwt::CredentialEpoch::new(1).expect("test epoch"),
+            bearer_fingerprint: BoundaryCredential::capture(&client.sandbox_bearer)
+                .expect("test bearer")
+                .fingerprint,
+            generation: 1,
+            channel,
+            transport: Arc::default(),
+        });
+        *client.attach_request.lock().unwrap() = Some(
+            RequestEnvelope::new(Request::Attach {
+                supervisor_instance_id: client.supervisor_instance_id,
+                policy: Box::new(SandboxPolicyWire::from(sandbox().policy)),
+            })
+            .unwrap(),
+        );
+        *client.confirm_request.lock().unwrap() =
+            Some(RequestEnvelope::new(Request::Confirm).unwrap());
+        // Each explicit read sends one request, with no automatic retry.
+        for expected_requests in 1..=2 {
+            assert!(matches!(
+                BoundaryProcess {
+                    exec: false,
+                    client: client.clone(),
+                    process_id: "test-generation:main:0".into()
+                }
+                .observe_ownership()
+                .await,
+                Err(BackendError::Unavailable(_))
             ));
             assert_eq!(requests.load(Ordering::Acquire), expected_requests);
             assert!(client.mediation.lock().await.is_none());

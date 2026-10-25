@@ -1,0 +1,62 @@
+---
+title: "Create ownership (partial source)"
+description: "Request-bound ownership does not authorize runtime readiness or retries."
+---
+
+This source is incomplete and advertises neither ownership capability.
+
+- Qualified namespace: immutable provenance for a newly initialized database, not an empty-object inference on upgrade
+- Audited Create: original caller, named workspace, canonical UUID and descriptor-projected fingerprint bound before detached execution
+- Resource commit: initial Sandbox, immutable binding and mutation target in one transaction before the driver effect marker
+- Terminal result: success with a retained binding, or NO_RESOURCE only after an ended owner without a binding or effect
+- Uncertain outcome: pending ownership retained after lost completion, caller cancellation or driver uncertainty, with no Create replay
+- Explicit fence: ABANDONED for a qualified never-admitted key, otherwise FENCED_PENDING while its owner can still finish
+- Receipt reads: fresh authorization and SELECT-only snapshots, with contradictory terminal records refused rather than repaired
+- Retention: 24-hour successful receipts and replay-cache completion, with permanent UUID fences and bindings after cache/resource deletion
+- SDK wire: canonical Go/Python/TypeScript generation; curated Rust, Go, Python and TypeScript receipt/fence methods check capability per operation
+- TypeScript transport: reuse the existing authenticated transport with CreateOwnershipClient; no automatic RPC retry, replacement selection or Create fallback
+
+The Linux network runtime exposes local process/socket facts from its actual entrypoint PID, with stable two-scan birth/executable/namespace checks and no descendant-only fallback.
+The observation wire and original-owner snapshot handler are present, but the handler returns no successful snapshots or cursors.
+It checks current workspace access, the original receipt key and exact binding/revisions; terminal reads do not require a surviving Sandbox.
+Negotiated reports are attached only to the current authenticated supervisor stream and expire after five seconds without refresh from heartbeats.
+Current supervisors leave report negotiation off: protected producer qualification, installed-policy validation, immutable snapshot publication and complete retained terminal journals remain pending.
+Local facts never authorize poller/broker absence or cleanup.
+PostgreSQL, installed SQL/image/runtime/restore qualification and independent final review remain separate merge requirements, with BROKER_BARRIER_UNQUALIFIED unchanged.
+
+## Python receipt reads and explicit fences
+
+Reuse an existing caller-owned authenticated connection and the exact original
+serialized Create from the same qualified release:
+
+```python
+from openshell import (
+    CreateOwnershipClient,
+    create_ownership_key_from_request,
+)
+
+ownership = CreateOwnershipClient.from_sandbox_client(connection)
+key = create_ownership_key_from_request(original_wire, schema_digest)
+receipt = ownership.get(
+    "workspace-a",
+    key,
+    expected_sandbox_id=expected_sandbox_id,
+)
+```
+
+The client retains the connection's TLS/bearer authentication and per-RPC timeout.
+It checks Health for each operation and sends the receipt read once without
+Create, replacement lookup or fence fallback. Missing capability and malformed
+or contradictory receipts raise ValueError; transport errors retain their gRPC
+status through GatewayError. Unknown and incomplete evidence never becomes absence.
+
+`ownership.fence("workspace-a", key)` is a separate explicitly authorized metadata
+mutation, not cancellation or runtime absence proof. A lost reply is an error;
+read back with `get` rather than automatically resending the fence or Create.
+The supplied channel must not contain mutation-retry policies/interceptors.
+Health cannot eliminate a later downgrade race; the server must enforce the contract.
+
+Results are frozen domain records with independent bytes and tuples, exact integer
+versions and seconds/nanoseconds timestamps. No receipt method closes the caller's
+connection, and `complete` describes only the Create result, never broker drainage.
+Owned generated-channel/vector tests do not qualify installed runtime or a wheel.

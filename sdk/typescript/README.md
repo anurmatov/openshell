@@ -318,6 +318,65 @@ The SDK ships primitives, not the CLI's terminal experience. Some things are int
 - **`upload()` / `download()`.** There is no file-transfer RPC — the CLI does tar-over-SSH. For small payloads, `exec`/`execStream` with `stdin` covers it. A first-class gateway file-transfer RPC is a follow-up.
 - **Detached / background forwards.** An in-process forward cannot outlive its caller; `forward` is process-lifetime only.
 
+## Original Create ownership keys
+
+`createOwnershipKeyFromRequest(originalWire, expectedSchemaDigest)` builds a typed
+original-request key from the exact serialized Create without sending an RPC.
+It uses the canonical compiled descriptor exported by the Rust core, clears only
+`request_id`, preserves the audited flag and rejects malformed, oversized,
+nonfinite or mismatching input without a legacy hash fallback.
+Use the expected digest from the same qualified release's
+`proto/create_fingerprint.v1.json`, not an arbitrary endpoint response.
+
+The build copies the unchanged descriptor asset into the published `dist/` tree.
+After a schema change, regenerate it with the core exporter and run both native
+and SDK source tests:
+
+```shell
+cargo run --locked -p openshell-core \
+  --example create_fingerprint_descriptor \
+  > /tmp/create_descriptor.bin &&
+cp /tmp/create_descriptor.bin \
+  sdk/typescript/src/create_descriptor.bin
+```
+
+`npm test` builds the package, runs the named Node source oracle and then Vitest.
+The source oracle checks the shared descriptor/projection/finite-number vectors
+and refusal/copy behavior; the matching Vitest tests instrument the source module.
+These are source checks, not actual gateway/runtime or broker-absence evidence.
+Snapshots, trusted observations, retained journals and remaining connected
+cross-SDK acceptance remain incomplete; ownership capabilities remain withheld and
+`BROKER_BARRIER_UNQUALIFIED` is unchanged.
+
+## Receipt reads and explicit fences
+
+Reuse the existing authenticated transport, without mutation-retry interceptors:
+
+```typescript
+import {
+  CreateOwnershipClient,
+  createOwnershipKeyFromRequest,
+} from '@nvidia/openshell-sdk';
+
+const ownership = new CreateOwnershipClient(client.transport);
+const key = createOwnershipKeyFromRequest(originalWire, schemaDigest);
+const receipt = await ownership.get('workspace-a', key, expectedSandboxID);
+```
+
+Every operation checks Health again, then sends its ownership RPC once.
+Missing capability, original-key mismatch, contradictory terminal evidence,
+unknown state or wrong immutable ID refuses the result with no fallback.
+Health does not eliminate a downgrade race before the operation; the server must
+still enforce the contract. Cancellation/deadline failures do not authorize retry.
+
+`ownership.fence('workspace-a', key)` is a separate, explicitly authorized metadata
+mutation, not owner cancellation or runtime absence proof. A lost fence reply is
+an error; use `get` for readback rather than resending the fence or Create.
+Incomplete, missing-as-of-read and expired receipts remain incomplete.
+Versions use bigint and timestamps retain seconds/nanoseconds without float loss.
+`complete` refers only to the Create result, never process/poller/broker drainage.
+The client copies request/response bytes rather than retaining caller buffers.
+
 ## Development
 
 The version field is a `0.0.0` placeholder; CI stamps the real version from the git release tag at publish time, matching the Rust and Python packages.

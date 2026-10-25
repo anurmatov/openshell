@@ -66,7 +66,7 @@ include = ["openshell*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-openshell = ["py.typed", "_proto/*.py", "_proto/*.pyi"]
+openshell = ["py.typed", "_proto/*.py", "_proto/*.pyi", "create_descriptor.bin"]
 
 [tool.ruff]
 target-version = "py311"

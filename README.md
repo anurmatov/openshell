@@ -70,6 +70,8 @@ SDKs connect applications to an OpenShell gateway. They do not install the CLI. 
 | Go | `go get github.com/NVIDIA/OpenShell/sdk/go@latest` | [README](sdk/go/README.md) |
 | Rust | `cargo add openshell-sdk --git https://github.com/NVIDIA/OpenShell --tag <release-tag>` | [Installation and usage](docs/sdk/rust.mdx) |
 
+Request-bound creation receipts remain an [incomplete source contract](docs/sdk/create-ownership.mdx), not an advertised runtime capability.
+
 ## Community
 
 - **Questions and discussion:** [GitHub Discussions](https://github.com/NVIDIA/OpenShell/discussions)

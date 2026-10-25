@@ -160,8 +160,15 @@ mod tests {
     // fields, and Health advertises their additive protocol capability.
     // Absent expectations retain legacy name-keyed behavior. These request
     // and health fields are public-only; no durable or overlap type changes.
+    // Additive Create ownership field 10 and receipt/fence RPCs add five public
+    // messages and two public enums, without changing durable or overlap schemas.
+    // Snapshot RPC, supervisor report/Hello and seven observation messages plus
+    // OwnershipState extend only the public closure; no stored field changes.
+    const OWNERSHIP_RPC_SIGNATURES: &[&str] = &[
+        "openshell.v1.OpenShell/GetSandboxOwnershipSnapshot|.openshell.v1.GetSandboxOwnershipSnapshotRequest|.openshell.v1.GetSandboxOwnershipSnapshotResponse|false|false",
+    ];
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "d2eab708f06f6d50fccec3043b5c061d82ae0593867e56a650571eeb28d4d79e";
+        "0796a03c566b53351a9dca2cbc8b26de48b9617d0a606e0205e3e2166568751f";
     const DURABLE_SCHEMA_SHA256: &str =
         "d4dc7abdb91b919db1f7be0d4652e30cbfda86f3b2ed9b59d5de1f76a2bf691d";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =
@@ -608,6 +615,12 @@ mod tests {
             BTreeSet::from(["Exchange", "Mediate"])
         );
         assert_eq!(supervisor_host_methods, BTreeSet::from(["Attach"]));
+        for signature in OWNERSHIP_RPC_SIGNATURES {
+            assert!(
+                methods.iter().any(|method| method == signature),
+                "ownership snapshot RPC is missing or changed: {signature}"
+            );
+        }
         for signature in PROVIDER_READINESS_RPC_SIGNATURES {
             assert!(
                 methods.iter().any(|method| method == signature),
@@ -628,7 +641,8 @@ mod tests {
         }
         assert_eq!(
             compiled_method_count,
-            103 + PROVIDER_READINESS_RPC_SIGNATURES.len()
+            105 + OWNERSHIP_RPC_SIGNATURES.len()
+                + PROVIDER_READINESS_RPC_SIGNATURES.len()
                 + PEER_OWNER_RPC_SIGNATURES.len()
                 + PEER_CONFIG_RPC_SIGNATURES.len()
                 + isolation_methods.len()
@@ -638,7 +652,8 @@ mod tests {
         );
         assert_eq!(
             methods.len(),
-            78 + PROVIDER_READINESS_RPC_SIGNATURES.len()
+            80 + OWNERSHIP_RPC_SIGNATURES.len()
+                + PROVIDER_READINESS_RPC_SIGNATURES.len()
                 + PEER_OWNER_RPC_SIGNATURES.len()
                 + PEER_CONFIG_RPC_SIGNATURES.len(),
             "inventory every public gateway RPC"
@@ -648,7 +663,8 @@ mod tests {
                 .iter()
                 .filter(|method| method.starts_with("openshell.v1.OpenShell/"))
                 .count(),
-            78 + PROVIDER_READINESS_RPC_SIGNATURES.len()
+            80 + OWNERSHIP_RPC_SIGNATURES.len()
+                + PROVIDER_READINESS_RPC_SIGNATURES.len()
                 + PEER_OWNER_RPC_SIGNATURES.len()
                 + PEER_CONFIG_RPC_SIGNATURES.len()
         );
@@ -699,7 +715,7 @@ mod tests {
                 overlap_hash.as_str(),
             ),
             (
-                (328, 29),
+                (340, 32),
                 (95, 22),
                 (83, 22),
                 PUBLIC_RPC_SCHEMA_SHA256,

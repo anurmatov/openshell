@@ -310,6 +310,14 @@ macro_rules! store_dispatch_traced {
 }
 
 impl Store {
+    /// Ownership admission uses these same durable pools, never a second database.
+    pub(crate) fn create_receipt_ledger(&self) -> crate::grpc::create_receipt::CreateReceiptLedger {
+        match self {
+            Self::Sqlite(store) => store.create_receipt_ledger(),
+            Self::Postgres(store) => store.create_receipt_ledger(),
+        }
+    }
+
     /// Returns `true` for single-replica backends (`SQLite`) where no lease
     /// coordination is needed, `false` for multi-replica backends (`Postgres`).
     pub fn is_single_replica(&self) -> bool {

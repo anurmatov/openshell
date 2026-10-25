@@ -53,6 +53,36 @@ service OpenShell {
     };
   }
 
+  // SELECT-only lookup for the original authenticated Create owner.
+  rpc GetSandboxCreateReceipt(GetSandboxCreateReceiptRequest)
+      returns (GetSandboxCreateReceiptResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:read"
+      workspace_role: "user"
+    };
+  }
+
+  // Original-owner read; unsupported producer placement never becomes absence.
+  rpc GetSandboxOwnershipSnapshot(GetSandboxOwnershipSnapshotRequest)
+      returns (GetSandboxOwnershipSnapshotResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:read"
+      workspace_role: "user"
+    };
+  }
+
+  // Explicit metadata-only admission fence; never cancels an admitted owner.
+  rpc FenceSandboxCreate(FenceSandboxCreateRequest)
+      returns (FenceSandboxCreateResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      workspace_role: "user"
+    };
+  }
+
   // Allocate a gateway-owned staging slot for a local rootfs tar archive.
   //
   // The gateway creates a request-scoped directory inside the compute driver's
@@ -1307,6 +1337,8 @@ message CreateSandboxRequest {
   // registered after the sandbox has been persisted and route only while the
   // sandbox is ready.
   repeated SandboxServiceExposure service_exposures = 9;
+  // Fail closed unless the gateway qualifies sandbox-create-ownership-v1.
+  bool require_ownership_receipt = 10;
 }
 
 message CreateSandboxTemplateRequest {
@@ -3126,6 +3158,7 @@ message SupervisorMessage {
     RelayOpenResult relay_open_result = 3;
     RelayClose relay_close = 4;
     ConfigUpdateResult config_update_result = 5;
+    SupervisorOwnershipReport ownership_report = 6;
   }
 }
 
@@ -3166,6 +3199,8 @@ message SupervisorHello {
   // ConfigUpdate payloads, and answers each with its result and admission.
   // Gateways push configuration only to supervisors that set this.
   bool supports_config_push = 7;
+  // Transport negotiation alone does not qualify collector placement.
+  bool supports_ownership_observations = 8;
 }
 
 // Gateway accepts the supervisor session.
@@ -4142,4 +4177,166 @@ message EndpointFailure {
   // Supervisor-minted UUID of the refused exchange. The workload receives the
   // same value in the x-openshell-request-id response header.
   string request_id = 8;
+}
+
+// Receipt ownership never implies runtime readiness or broker drain.
+enum CreateReceiptState {
+  CREATE_RECEIPT_STATE_UNSPECIFIED = 0;
+  CREATE_RECEIPT_STATE_PENDING = 1;
+  CREATE_RECEIPT_STATE_SUCCEEDED = 2;
+  CREATE_RECEIPT_STATE_AMBIGUOUS = 3;
+  CREATE_RECEIPT_STATE_NO_RESOURCE = 4;
+  CREATE_RECEIPT_STATE_EXPIRED = 5;
+  CREATE_RECEIPT_STATE_NOT_FOUND_AS_OF_READ = 6;
+  CREATE_RECEIPT_STATE_UNSUPPORTED_COVERAGE = 7;
+  CREATE_RECEIPT_STATE_ABANDONED = 8;
+  CREATE_RECEIPT_STATE_FENCED_PENDING = 9;
+}
+enum CreateEffectState {
+  CREATE_EFFECT_STATE_UNSPECIFIED = 0;
+  CREATE_EFFECT_STATE_NOT_STARTED = 1;
+  CREATE_EFFECT_STATE_RESOURCE_COMMITTED = 2;
+  CREATE_EFFECT_STATE_DRIVER_STARTED = 3;
+  CREATE_EFFECT_STATE_OWNER_TERMINAL = 4;
+}
+message GetSandboxCreateReceiptRequest {
+  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
+  string request_id = 2;
+  bytes payload_fingerprint = 3;
+  optional string expected_sandbox_id = 4;
+  string fingerprint_schema_digest = 5;
+}
+message CreateOwnershipBinding {
+  string claim_incarnation_id = 1;
+  string sandbox_id = 2;
+  uint64 initial_resource_version = 3;
+  optional uint64 current_resource_version = 4;
+  string current_state = 5;
+  CreateEffectState effect_state = 6;
+  uint64 binding_revision = 7;
+}
+message GetSandboxCreateReceiptResponse {
+  CreateReceiptState receipt_state = 1;
+  string request_id = 2;
+  bytes fingerprint = 3;
+  uint64 receipt_revision = 4;
+  google.protobuf.Timestamp created_at = 5;
+  optional google.protobuf.Timestamp completed_at = 6;
+  optional google.protobuf.Timestamp expires_at = 7;
+  string coverage_epoch = 8;
+  repeated CreateOwnershipBinding bindings = 9;
+  bool complete = 10;
+  string fingerprint_schema_digest = 11;
+  uint64 fence_revision = 12;
+  bool admission_closed = 13;
+  string reason_code = 14;
+}
+message FenceSandboxCreateRequest {
+  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
+  string request_id = 2;
+  bytes payload_fingerprint = 3;
+  string fingerprint_schema_digest = 4;
+}
+message FenceSandboxCreateResponse {
+  GetSandboxCreateReceiptResponse receipt = 1;
+}
+
+// Runtime ownership observations are not broker-completeness evidence.
+enum OwnershipState {
+  OWNERSHIP_STATE_UNSPECIFIED = 0;
+  OWNERSHIP_STATE_PRESENT = 1;
+  OWNERSHIP_STATE_PROVEN_ABSENT = 2;
+  OWNERSHIP_STATE_UNKNOWN = 3;
+  OWNERSHIP_STATE_UNAVAILABLE = 4;
+  OWNERSHIP_STATE_UNOWNED = 5;
+}
+message OwnershipDomainEvidence {
+  OwnershipState state = 1;
+  bool complete = 2;
+  string reason_code = 3;
+  uint64 count = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  string source_id = 6;
+  uint64 source_revision = 7;
+}
+message ProcessIdentity {
+  string kernel_boot_id = 1;
+  uint32 pid = 2;
+  uint64 starttime_ticks = 3;
+  uint64 pid_namespace_inode = 4;
+  uint64 net_namespace_inode = 5;
+  bytes executable_digest = 6;
+  string platform_component_id = 7;
+}
+message SocketObservation {
+  uint64 inode = 1;
+  string protocol = 2;
+  string local_ip = 3;
+  uint32 local_port = 4;
+  string remote_ip = 5;
+  uint32 remote_port = 6;
+  repeated ProcessIdentity owners = 7;
+  string connection_incarnation = 8;
+}
+message PollObservation {
+  string operation_id = 1;
+  ProcessIdentity process = 2;
+  string destination_id = 3;
+  bytes token_version_fingerprint = 4;
+  google.protobuf.Timestamp started_at = 5;
+  bool active = 6;
+  uint64 operation_revision = 7;
+}
+message SupervisorOwnershipReport {
+  uint64 sequence = 1;
+  string main_instance_id = 2;
+  string network_instance_id = 3;
+  bytes applied_policy_hash = 4;
+  OwnershipDomainEvidence processes = 5;
+  OwnershipDomainEvidence sockets = 6;
+  OwnershipDomainEvidence pollers = 7;
+  repeated ProcessIdentity process_items = 8;
+  repeated SocketObservation socket_items = 9;
+  repeated PollObservation poll_items = 10;
+  bytes inventory_digest = 11;
+  bool complete = 12;
+  google.protobuf.Timestamp observed_at = 13;
+}
+message GetSandboxOwnershipSnapshotRequest {
+  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
+  string name = 2;
+  string expected_sandbox_id = 3;
+  uint64 expected_resource_version = 4;
+  uint32 page_size = 5;
+  string page_token = 6;
+  string create_request_id = 7;
+  bytes original_fingerprint = 8;
+  uint64 expected_receipt_revision = 9;
+  bool terminal_only = 10;
+}
+message GetSandboxOwnershipSnapshotResponse {
+  string snapshot_id = 1;
+  uint64 snapshot_revision = 2;
+  google.protobuf.Timestamp as_of = 3;
+  google.protobuf.Timestamp valid_until = 4;
+  string sandbox_id = 5;
+  uint64 resource_version = 6;
+  string session_id = 7;
+  uint64 connection_epoch = 8;
+  string main_instance_id = 9;
+  string network_instance_id = 10;
+  bytes policy_hash = 11;
+  OwnershipDomainEvidence processes = 12;
+  OwnershipDomainEvidence sockets = 13;
+  OwnershipDomainEvidence pollers = 14;
+  repeated ProcessIdentity process_items = 15;
+  repeated SocketObservation socket_items = 16;
+  repeated PollObservation poll_items = 17;
+  string next_page_token = 18;
+  bool complete = 19;
+  uint64 terminal_revision = 20;
+  bytes manifest_digest = 21;
+  string create_request_id = 22;
+  uint64 receipt_revision = 23;
+  string coverage_epoch = 24;
 }

@@ -34,11 +34,11 @@
   },
   "scripts": {
     "gen": "buf generate",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-canonical-descriptor.mjs",
     "typecheck": "tsc --noEmit",
     "format": "biome check --write .",
     "lint": "biome ci .",
-    "test": "vitest run --coverage",
+    "test": "npm run build && node --test tests/create-fingerprint.source.mjs && vitest run --coverage",
     "prepublishOnly": "npm run gen && npm run build"
   },
   "dependencies": {

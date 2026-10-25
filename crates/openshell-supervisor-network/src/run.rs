@@ -247,6 +247,8 @@ impl ProxyTlsFiles {
 /// `run_sandbox`'s frame.
 pub struct Networking {
     pub proxy: Option<ProxyHandle>,
+    #[cfg(target_os = "linux")]
+    ownership: crate::ownership::OwnershipCollector,
 
     pub ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Policy-local route context: shared with the orchestrator's policy poll
@@ -258,6 +260,40 @@ pub struct Networking {
     _policy_dns: Option<crate::policy_dns::PolicyDnsRuntime>,
     #[cfg(target_os = "linux")]
     _transparent_tcp: Option<crate::proxy::TransparentTcpHandle>,
+}
+
+impl Networking {
+    /// Freeze local facts through this runtime's actual entrypoint handle.
+    /// This does not qualify the protected supervisor/report/session boundary.
+    #[cfg(target_os = "linux")]
+    pub fn ownership_snapshot(
+        &self,
+    ) -> std::result::Result<crate::ownership::FrozenInventory, crate::ownership::ObservationError>
+    {
+        self.ownership.freeze()
+    }
+
+    /// Read an unchanged frozen local page after a fresh source check.
+    #[cfg(target_os = "linux")]
+    pub fn ownership_snapshot_page(
+        &self,
+        snapshot: &crate::ownership::FrozenInventory,
+        process: usize,
+        socket: usize,
+        size: usize,
+    ) -> std::result::Result<crate::ownership::InventoryPage, crate::ownership::ObservationError>
+    {
+        self.ownership.frozen_page(snapshot, process, socket, size)
+    }
+
+    /// Local observations only; never authorizes report trust, poller/broker absence or cleanup.
+    #[cfg(target_os = "linux")]
+    pub fn ownership_inventory(
+        &self,
+    ) -> std::result::Result<crate::ownership::NamespaceInventory, crate::ownership::ObservationError>
+    {
+        self.ownership.inventory()
+    }
 }
 
 /// Set up the networking stack: ephemeral CA + TLS state, proxy server,
@@ -297,6 +333,8 @@ pub async fn run_networking(
     network_mediation_source: Option<Arc<NetworkMediationSource>>,
     proxy_listener: Option<ProxyListenerConfig>,
 ) -> Result<Networking> {
+    #[cfg(target_os = "linux")]
+    let ownership = crate::ownership::OwnershipCollector::new(entrypoint_pid.clone());
     // Build the policy-local route context. The orchestrator's policy poll
     // loop also holds an `Arc` clone (via `Networking::policy_local_ctx`) so
     // it can publish updated policy snapshots after a successful reload.
@@ -656,6 +694,8 @@ pub async fn run_networking(
 
     Ok(Networking {
         proxy: proxy_handle,
+        #[cfg(target_os = "linux")]
+        ownership,
         ca_file_paths,
         policy_local_ctx,
         _mediated_policy_dns: mediated_policy_dns,

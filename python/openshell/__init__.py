@@ -5,6 +5,15 @@
 
 from __future__ import annotations
 
+from .create_fingerprint import CreateOwnershipKey, create_ownership_key_from_request
+from .create_ownership import (
+    CreateEffectState,
+    CreateOwnershipBinding,
+    CreateOwnershipClient,
+    CreateOwnershipReceipt,
+    CreateReceiptState,
+    OwnershipTimestamp,
+)
 from .errors import ErrorInfo, FieldViolation, GatewayError, from_grpc_error
 from .mutations import DeletionOutcome, DeletionResult
 from .providers import ProviderClient, ProviderCredentialValue
@@ -39,6 +48,12 @@ except Exception:
 
 __all__ = [
     "ClientCredentialsAuth",
+    "CreateEffectState",
+    "CreateOwnershipBinding",
+    "CreateOwnershipClient",
+    "CreateOwnershipKey",
+    "CreateOwnershipReceipt",
+    "CreateReceiptState",
     "DeletionOutcome",
     "DeletionResult",
     "ErrorInfo",
@@ -46,6 +61,7 @@ __all__ = [
     "ExecResult",
     "FieldViolation",
     "GatewayError",
+    "OwnershipTimestamp",
     "Page",
     "Pager",
     "ProviderClient",
@@ -65,5 +81,6 @@ __all__ = [
     "WorkspaceClient",
     "WorkspaceRef",
     "__version__",
+    "create_ownership_key_from_request",
     "from_grpc_error",
 ]
