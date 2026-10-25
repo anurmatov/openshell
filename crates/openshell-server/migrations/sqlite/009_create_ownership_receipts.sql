@@ -46,3 +46,16 @@ WHEN OLD.caller_hash IS NOT NEW.caller_hash OR OLD.workspace_id IS NOT NEW.works
  OR OLD.schema_digest IS NOT NEW.schema_digest OR OLD.coverage_epoch IS NOT NEW.coverage_epoch
  OR OLD.created_at_ms IS NOT NEW.created_at_ms
 BEGIN SELECT RAISE(ABORT, 'immutable ownership'); END;
+
+-- Legacy replay rows may expire, but their UUIDs cannot become audited absence.
+CREATE TABLE sandbox_create_legacy_keys (
+    caller_hash TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    request_uuid TEXT NOT NULL,
+    mutation_key TEXT NOT NULL,
+    PRIMARY KEY (caller_hash,workspace_id,request_uuid)
+);
+CREATE TRIGGER create_legacy_key_no_delete BEFORE DELETE ON sandbox_create_legacy_keys
+BEGIN SELECT RAISE(ABORT, 'legacy coverage retention'); END;
+CREATE TRIGGER create_legacy_key_no_update BEFORE UPDATE ON sandbox_create_legacy_keys
+BEGIN SELECT RAISE(ABORT, 'immutable legacy coverage'); END;

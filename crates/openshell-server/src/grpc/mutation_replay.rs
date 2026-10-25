@@ -170,6 +170,9 @@ pub(super) async fn run<M: Mutation>(
         barrier.resume.notified().await;
     }
     let effective_scope = request.get_ref().authorize(state, &principal).await?;
+    if M::METHOD == "CreateSandbox" && scope.workspace_id != effective_scope.workspace_id {
+        return Err(replay_unavailable());
+    }
     if original.target_selector().is_some()
         && original.target_selector() == request.get_ref().target_selector()
         && (scope.workspace_id != effective_scope.workspace_id
@@ -255,6 +258,18 @@ async fn execute_owned<M: Mutation>(
     protection: Option<Protection>,
     scope: Scope,
 ) -> Result<Response<M::Output>, Status> {
+    let create_key = if M::METHOD == "CreateSandbox" {
+        Some(super::create_receipt::ReceiptKey {
+            caller_hash: bucket
+                .strip_prefix("_mutation/")
+                .ok_or_else(uncertain)?
+                .into(),
+            workspace_id: scope.workspace_id.clone().ok_or_else(uncertain)?,
+            request_uuid: validate_request_id(request.get_ref().request_id())?,
+        })
+    } else {
+        None
+    };
     let admission = Admission {
         format_version: 1,
         payload_hash,
@@ -266,6 +281,14 @@ async fn execute_owned<M: Mutation>(
     };
     // Contention is bounded. Losing a race never authorizes execution.
     for _ in 0..8 {
+        if let Some(key) = create_key.as_ref() {
+            state
+                .store
+                .create_receipt_ledger()
+                .guard_legacy(key)
+                .await
+                .map_err(create_guard_error)?;
+        }
         if let Some(row) = state
             .store
             .get_by_name(OBJECT_TYPE, bucket, key)
@@ -323,18 +346,38 @@ async fn execute_owned<M: Mutation>(
         // A new incarnation needs a new row ID. Versions reset after deletion;
         // an expiry cleaner holding an old snapshot must not delete a new claim.
         let claim_id = uuid::Uuid::new_v4().to_string();
-        let write = state
-            .store
-            .create_if_workspace_count_below(
-                OBJECT_TYPE,
-                &claim_id,
-                key,
-                bucket,
-                &payload,
-                None,
-                u64::from(MAX_ADMISSIONS_PER_CALLER),
-            )
-            .await;
+        let write = if let Some(create_key) = create_key.as_ref() {
+            use super::create_receipt::LegacyReservation;
+            let now_ms = current_time_ms();
+            match state
+                .store
+                .create_receipt_ledger()
+                .reserve_legacy(create_key, &claim_id, key, &payload, now_ms)
+                .await
+                .map_err(create_guard_error)?
+            {
+                LegacyReservation::Created => Ok(Some(crate::persistence::WriteResult {
+                    resource_version: 1,
+                    created_at_ms: now_ms,
+                    updated_at_ms: now_ms,
+                })),
+                LegacyReservation::Contended => continue,
+                LegacyReservation::Full => Ok(None),
+            }
+        } else {
+            state
+                .store
+                .create_if_workspace_count_below(
+                    OBJECT_TYPE,
+                    &claim_id,
+                    key,
+                    bucket,
+                    &payload,
+                    None,
+                    u64::from(MAX_ADMISSIONS_PER_CALLER),
+                )
+                .await
+        };
         let version = match write {
             Ok(Some(write)) => write.resource_version,
             Ok(None) => {
@@ -827,3 +870,14 @@ mod tests;
 
 pub(super) mod ordinary;
 pub(super) mod streaming;
+
+fn create_guard_error(error: super::create_receipt::LedgerError) -> Status {
+    match error {
+        super::create_receipt::LedgerError::Fenced => rpc_error::failed_precondition(
+            "REQUEST_ID_FENCED",
+            "the original Create request is permanently fenced",
+        ),
+        super::create_receipt::LedgerError::Pending => uncertain(),
+        _ => Status::unavailable("create ownership admission guard unavailable"),
+    }
+}

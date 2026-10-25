@@ -116,6 +116,14 @@ fn decode(payload: &str, key: &ReceiptKey, fingerprint: &str, schema: &str) -> R
     Ok(receipt)
 }
 
+/// Legacy replay retains its format and quota; this guard grants only one new owner.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LegacyReservation {
+    Created,
+    Contended,
+    Full,
+}
+
 /// Pools are supplied by the existing durable Store, never from a caller URL.
 #[derive(Clone)]
 pub(crate) enum CreateReceiptLedger {
@@ -155,6 +163,31 @@ impl CreateReceiptLedger {
             }
         }
         .map_err(|_| LedgerError::Unavailable)?;
+        if payload.is_none() {
+            let sql = "SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3";
+            let legacy: Option<String> = match self {
+                Self::Sqlite(pool) => {
+                    sqlx::query_scalar(sql)
+                        .bind(&key.caller_hash)
+                        .bind(&key.workspace_id)
+                        .bind(&key.request_uuid)
+                        .fetch_optional(pool)
+                        .await
+                }
+                Self::Postgres(pool) => {
+                    sqlx::query_scalar(sql)
+                        .bind(&key.caller_hash)
+                        .bind(&key.workspace_id)
+                        .bind(&key.request_uuid)
+                        .fetch_optional(pool)
+                        .await
+                }
+            }
+            .map_err(|_| LedgerError::Unavailable)?;
+            if legacy.is_some() {
+                return Err(LedgerError::UnsupportedCoverage);
+            }
+        }
         payload
             .map(|payload| decode(&payload, key, fingerprint, schema))
             .transpose()
@@ -178,6 +211,62 @@ impl CreateReceiptLedger {
         }
     }
 
+    /// Every UUID-bearing legacy Create consults this before replay or dispatch.
+    /// The later atomic reservation repeats the check under the database lock.
+    pub(crate) async fn guard_legacy(&self, key: &ReceiptKey) -> Result<()> {
+        key.validate()?;
+        let sql = "SELECT admission_closed FROM sandbox_create_ownership WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3";
+        let closed: Option<bool> = match self {
+            Self::Sqlite(pool) => {
+                sqlx::query_scalar(sql)
+                    .bind(&key.caller_hash)
+                    .bind(&key.workspace_id)
+                    .bind(&key.request_uuid)
+                    .fetch_optional(pool)
+                    .await
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar(sql)
+                    .bind(&key.caller_hash)
+                    .bind(&key.workspace_id)
+                    .bind(&key.request_uuid)
+                    .fetch_optional(pool)
+                    .await
+            }
+        }
+        .map_err(|_| LedgerError::Unavailable)?;
+        legacy_allowed(closed)
+    }
+
+    /// Legacy admission and ownership/fence check share one database transaction.
+    /// The existing payload bytes, claim namespace and 1000-row quota are unchanged.
+    pub(crate) async fn reserve_legacy(
+        &self,
+        key: &ReceiptKey,
+        claim_id: &str,
+        mutation_key: &str,
+        payload: &[u8],
+        now_ms: i64,
+    ) -> Result<LegacyReservation> {
+        key.validate()?;
+        if !uuid(claim_id) || !digest(mutation_key) || now_ms < 0 {
+            return Err(LedgerError::Invalid);
+        }
+        let admission: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|_| LedgerError::Invalid)?;
+        if admission["format_version"] != 1 || admission["workspace_id"] != key.workspace_id {
+            return Err(LedgerError::Invalid);
+        }
+        match self {
+            Self::Sqlite(pool) => {
+                reserve_legacy_sqlite(pool, key, claim_id, mutation_key, payload, now_ms).await
+            }
+            Self::Postgres(pool) => {
+                reserve_legacy_postgres(pool, key, claim_id, mutation_key, payload, now_ms).await
+            }
+        }
+    }
+
     /// Commit the chosen Sandbox and its immutable ownership in the same transaction.
     /// Only the originally admitted owner may bind, including after an explicit fence.
     /// This is not an execution/replay grant and performs no driver work.
@@ -190,7 +279,7 @@ impl CreateReceiptLedger {
         let metadata = sandbox.metadata.as_ref().ok_or(LedgerError::Invalid)?;
         if !uuid(&metadata.id)
             || metadata.name.is_empty()
-            || metadata.workspace != owner.key.workspace_id
+            || metadata.workspace.is_empty()
             || metadata.resource_version != 0
         {
             return Err(LedgerError::Invalid);
@@ -262,6 +351,18 @@ async fn reserve_sqlite_transaction(
         // An admitted owner remains the sole owner; no new execution grant is returned.
         return Err(LedgerError::Pending);
     }
+    let retained_legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&receipt.key.caller_hash).bind(&receipt.key.workspace_id).bind(&receipt.key.request_uuid)
+        .fetch_optional(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if retained_legacy.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
+    let legacy_claim: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
+        .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
+        .fetch_optional(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if legacy_claim.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sandbox_create_ownership WHERE caller_hash=$1 AND state IN ('PENDING','AMBIGUOUS','FENCED_PENDING')")
         .bind(&receipt.key.caller_hash).fetch_one(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
     if count >= 1000 {
@@ -320,6 +421,12 @@ async fn fence_sqlite_transaction(
         previous.fence_revision = 1;
         receipt = previous;
     }
+    let retained_legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&receipt.key.caller_hash).bind(&receipt.key.workspace_id).bind(&receipt.key.request_uuid)
+        .fetch_optional(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if retained_legacy.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
     if receipt.state == ReceiptState::Abandoned {
         let legacy: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
             .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
@@ -373,6 +480,18 @@ async fn reserve_postgres(pool: &PgPool, receipt: &Receipt, mutation_key: &str) 
         }
         // An admitted owner remains the sole owner; no new execution grant is returned.
         return Err(LedgerError::Pending);
+    }
+    let retained_legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&receipt.key.caller_hash).bind(&receipt.key.workspace_id).bind(&receipt.key.request_uuid)
+        .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if retained_legacy.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
+    let legacy_claim: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
+        .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
+        .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if legacy_claim.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
     }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sandbox_create_ownership WHERE caller_hash=$1 AND state IN ('PENDING','AMBIGUOUS','FENCED_PENDING')")
         .bind(&receipt.key.caller_hash).fetch_one(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
@@ -431,6 +550,12 @@ async fn fence_postgres(
         previous.fence_revision = 1;
         receipt = previous;
     }
+    let retained_legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&receipt.key.caller_hash).bind(&receipt.key.workspace_id).bind(&receipt.key.request_uuid)
+        .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if retained_legacy.is_some() {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
     if receipt.state == ReceiptState::Abandoned {
         let legacy: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
             .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
@@ -472,6 +597,23 @@ async fn bind_sqlite(pool: &SqlitePool, owner: &Receipt, sandbox: &Sandbox) -> R
         .bind(&owner.key.caller_hash).bind(&owner.key.workspace_id).bind(&owner.key.request_uuid)
         .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?.ok_or(LedgerError::Mismatch)?;
     let mut current = binding_owner(&payload, owner)?;
+    // Receipt keys carry the immutable Workspace ID; Sandbox metadata carries
+    // its name. Resolve that authoritative mapping inside the binding transaction.
+    let workspace_name: String = sqlx::query_scalar(
+        "SELECT name FROM objects WHERE object_type='workspace' AND id=$1 AND workspace=''",
+    )
+    .bind(&owner.key.workspace_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| LedgerError::Unavailable)?
+    .ok_or(LedgerError::Mismatch)?;
+    if sandbox
+        .metadata
+        .as_ref()
+        .is_none_or(|metadata| metadata.workspace != workspace_name)
+    {
+        return Err(LedgerError::Mismatch);
+    }
     let existing: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM sandbox_create_ownership_bindings WHERE claim_id=$1",
     )
@@ -527,6 +669,17 @@ async fn bind_postgres(pool: &PgPool, owner: &Receipt, sandbox: &Sandbox) -> Res
         .bind(&owner.key.caller_hash).bind(&owner.key.workspace_id).bind(&owner.key.request_uuid)
         .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?.ok_or(LedgerError::Mismatch)?;
     let mut current = binding_owner(&payload, owner)?;
+    // Receipt keys carry the immutable Workspace ID; Sandbox metadata carries
+    // its name. Resolve that authoritative mapping inside the binding transaction.
+    let workspace_name: String = sqlx::query_scalar("SELECT name FROM objects WHERE object_type='workspace' AND id=$1 AND workspace='' FOR SHARE")
+        .bind(&owner.key.workspace_id).fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?.ok_or(LedgerError::Mismatch)?;
+    if sandbox
+        .metadata
+        .as_ref()
+        .is_none_or(|metadata| metadata.workspace != workspace_name)
+    {
+        return Err(LedgerError::Mismatch);
+    }
     let existing: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM sandbox_create_ownership_bindings WHERE claim_id=$1",
     )
@@ -542,7 +695,7 @@ async fn bind_postgres(pool: &PgPool, owner: &Receipt, sandbox: &Sandbox) -> Res
         .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?.ok_or(LedgerError::Corrupt)?;
     let mut claim = binding_claim(&claim_bytes, owner)?;
     let metadata = sandbox.metadata.as_ref().ok_or(LedgerError::Invalid)?;
-    let labels = serde_json::to_string(&metadata.labels).map_err(|_| LedgerError::Invalid)?;
+    let labels = serde_json::to_value(&metadata.labels).map_err(|_| LedgerError::Invalid)?;
     sqlx::query("INSERT INTO objects(id,object_type,name,workspace,payload,created_at_ms,updated_at_ms,labels,resource_version) VALUES ($1,'sandbox',$2,$3,$4,$5,$5,$6,1)")
         .bind(&metadata.id).bind(&metadata.name).bind(&metadata.workspace).bind(sandbox.encode_to_vec())
         .bind(owner.created_at_ms).bind(labels).execute(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
@@ -602,4 +755,139 @@ fn binding_claim(bytes: &[u8], owner: &Receipt) -> Result<serde_json::Value> {
         return Err(LedgerError::Corrupt);
     }
     Ok(claim)
+}
+
+fn legacy_allowed(closed: Option<bool>) -> Result<()> {
+    match closed {
+        Some(true) => Err(LedgerError::Fenced),
+        Some(false) => Err(LedgerError::Pending),
+        None => Ok(()),
+    }
+}
+
+async fn reserve_legacy_sqlite(
+    pool: &SqlitePool,
+    key: &ReceiptKey,
+    claim_id: &str,
+    mutation_key: &str,
+    payload: &[u8],
+    now_ms: i64,
+) -> Result<LegacyReservation> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| LedgerError::Unavailable)?;
+    let result =
+        reserve_legacy_sqlite_transaction(&mut tx, key, claim_id, mutation_key, payload, now_ms)
+            .await?;
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(result)
+}
+
+async fn reserve_legacy_sqlite_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &ReceiptKey,
+    claim_id: &str,
+    mutation_key: &str,
+    payload: &[u8],
+    now_ms: i64,
+) -> Result<LegacyReservation> {
+    let bucket = format!("_mutation/{}", key.caller_hash);
+    sqlx::query("INSERT INTO sandbox_create_ownership_callers(caller_hash) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(&key.caller_hash).execute(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    let closed: Option<bool> = sqlx::query_scalar("SELECT admission_closed FROM sandbox_create_ownership WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid)
+        .fetch_optional(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    legacy_allowed(closed)?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM objects WHERE object_type='mutation_admission_v1' AND workspace=$1",
+    )
+    .bind(&bucket)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|_| LedgerError::Unavailable)?;
+    if count >= 1000 {
+        return Ok(LegacyReservation::Full);
+    }
+    let previous_key: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid)
+        .fetch_optional(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if previous_key
+        .as_deref()
+        .is_some_and(|previous| previous != mutation_key)
+    {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
+    let written = sqlx::query("INSERT INTO objects(id,object_type,name,workspace,payload,created_at_ms,updated_at_ms,labels,resource_version) VALUES ($1,'mutation_admission_v1',$2,$3,$4,$5,$5,'{}',1) ON CONFLICT (object_type,workspace,name) WHERE name IS NOT NULL DO NOTHING")
+        .bind(claim_id).bind(mutation_key).bind(&bucket).bind(payload).bind(now_ms)
+        .execute(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if written.rows_affected() == 0 {
+        return Ok(LegacyReservation::Contended);
+    }
+    sqlx::query("INSERT INTO sandbox_create_legacy_keys(caller_hash,workspace_id,request_uuid,mutation_key) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).bind(mutation_key)
+        .execute(&mut **tx).await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(LegacyReservation::Created)
+}
+
+async fn reserve_legacy_postgres(
+    pool: &PgPool,
+    key: &ReceiptKey,
+    claim_id: &str,
+    mutation_key: &str,
+    payload: &[u8],
+    now_ms: i64,
+) -> Result<LegacyReservation> {
+    let mut tx = pool.begin().await.map_err(|_| LedgerError::Unavailable)?;
+    let bucket = format!("_mutation/{}", key.caller_hash);
+    sqlx::query("INSERT INTO sandbox_create_ownership_callers(caller_hash) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(&key.caller_hash).execute(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    sqlx::query(
+        "SELECT caller_hash FROM sandbox_create_ownership_callers WHERE caller_hash=$1 FOR UPDATE",
+    )
+    .bind(&key.caller_hash)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| LedgerError::Unavailable)?;
+    // Same quota lock as the existing generic mutation admission path.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+        .bind("mutation_admission_v1")
+        .bind(&bucket)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| LedgerError::Unavailable)?;
+    let closed: Option<bool> = sqlx::query_scalar("SELECT admission_closed FROM sandbox_create_ownership WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid)
+        .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    legacy_allowed(closed)?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM objects WHERE object_type='mutation_admission_v1' AND workspace=$1",
+    )
+    .bind(&bucket)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| LedgerError::Unavailable)?;
+    if count >= 1000 {
+        return Ok(LegacyReservation::Full);
+    }
+    let previous_key: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid)
+        .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if previous_key
+        .as_deref()
+        .is_some_and(|previous| previous != mutation_key)
+    {
+        return Err(LedgerError::UnsupportedCoverage);
+    }
+    let written = sqlx::query("INSERT INTO objects(id,object_type,name,workspace,payload,created_at_ms,updated_at_ms,labels,resource_version) VALUES ($1,'mutation_admission_v1',$2,$3,$4,$5,$5,'{}',1) ON CONFLICT (object_type,workspace,name) WHERE name IS NOT NULL DO NOTHING")
+        .bind(claim_id).bind(mutation_key).bind(&bucket).bind(payload).bind(now_ms)
+        .execute(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if written.rows_affected() == 0 {
+        return Ok(LegacyReservation::Contended);
+    }
+    sqlx::query("INSERT INTO sandbox_create_legacy_keys(caller_hash,workspace_id,request_uuid,mutation_key) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).bind(mutation_key)
+        .execute(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(LegacyReservation::Created)
 }

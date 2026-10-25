@@ -22,7 +22,7 @@ fn receipt(index: u128) -> Receipt {
     Receipt {
         key: ReceiptKey {
             caller_hash: "a".repeat(64),
-            workspace_id: "workspace-a".into(),
+            workspace_id: uuid::Uuid::from_u128(99998).to_string(),
             request_uuid: uuid::Uuid::from_u128(index + 1).to_string(),
         },
         claim_id: uuid::Uuid::from_u128(index + 10001).to_string(),
@@ -39,7 +39,7 @@ fn receipt(index: u128) -> Receipt {
 }
 async fn count(pool: &SqlitePool, table: &str) -> i64 {
     sqlx::query_scalar(match table {
-        "objects" => "SELECT count(*) FROM objects",
+        "objects" => "SELECT count(*) FROM objects WHERE object_type != 'workspace'",
         "sandbox_create_ownership" => "SELECT count(*) FROM sandbox_create_ownership",
         "sandbox_create_ownership_callers" => {
             "SELECT count(*) FROM sandbox_create_ownership_callers"
@@ -236,6 +236,22 @@ async fn create_request_fence_never_reports_absence_for_a_legacy_claim() {
     assert_eq!(count(&pool, "objects").await, 1);
 }
 
+async fn binding_ledger() -> (CreateReceiptLedger, SqlitePool) {
+    use prost::Message;
+    let (ledger, pool) = ledger().await;
+    let workspace = openshell_core::proto::Workspace {
+        metadata: Some(openshell_core::proto::ObjectMeta {
+            id: receipt(1).key.workspace_id,
+            name: "workspace-a".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    sqlx::query("INSERT INTO objects(id,object_type,name,workspace,payload,created_at_ms,updated_at_ms,labels,resource_version) VALUES ($1,'workspace','workspace-a','',$2,1,1,'{}',1)")
+        .bind(receipt(1).key.workspace_id).bind(workspace.encode_to_vec()).execute(&pool).await.unwrap();
+    (ledger, pool)
+}
+
 fn sandbox(index: u128, name: &str) -> openshell_core::proto::Sandbox {
     openshell_core::proto::Sandbox {
         metadata: Some(openshell_core::proto::ObjectMeta {
@@ -251,7 +267,7 @@ fn sandbox(index: u128, name: &str) -> openshell_core::proto::Sandbox {
 #[tokio::test]
 async fn create_receipt_binding_commits_sandbox_and_owner_after_fence() {
     use prost::Message;
-    let (ledger, pool) = ledger().await;
+    let (ledger, pool) = binding_ledger().await;
     let owner = receipt(1);
     ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
     ledger.fence(owner.clone(), &"1".repeat(64)).await.unwrap();
@@ -297,7 +313,7 @@ async fn create_receipt_binding_commits_sandbox_and_owner_after_fence() {
 
 #[tokio::test]
 async fn create_receipt_binding_refuses_foreign_owner_and_rolls_back_conflict() {
-    let (ledger, pool) = ledger().await;
+    let (ledger, pool) = binding_ledger().await;
     let owner = receipt(1);
     ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
     let mut foreign = owner.clone();
@@ -500,7 +516,7 @@ async fn create_receipt_overlapping_connections_quota_accepts_only_last_slot() {
 
 #[tokio::test]
 async fn create_receipt_binding_failure_after_insert_rolls_back_every_write() {
-    let (ledger, pool) = ledger().await;
+    let (ledger, pool) = binding_ledger().await;
     let owner = receipt(1);
     ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
     // Fail after Sandbox and binding insertion, at mutation-claim enrichment.
@@ -529,7 +545,7 @@ async fn create_receipt_binding_failure_after_insert_rolls_back_every_write() {
 
 #[tokio::test]
 async fn create_receipt_binding_requires_an_admitted_owner_and_matching_workspace() {
-    let (ledger, pool) = ledger().await;
+    let (ledger, pool) = binding_ledger().await;
     let owner = receipt(1);
     assert!(
         ledger
@@ -561,7 +577,7 @@ async fn create_receipt_binding_requires_an_admitted_owner_and_matching_workspac
 
 #[tokio::test]
 async fn create_receipt_binding_cannot_reassign_a_deleted_sandbox_id() {
-    let (ledger, pool) = ledger().await;
+    let (ledger, pool) = binding_ledger().await;
     let first = receipt(1);
     ledger.reserve(&first, &"1".repeat(64)).await.unwrap();
     ledger
@@ -594,5 +610,281 @@ async fn create_receipt_binding_cannot_reassign_a_deleted_sandbox_id() {
             .await
             .unwrap(),
         Some(next)
+    );
+}
+
+fn legacy_payload(key: &ReceiptKey) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "format_version":1,"payload_hash":"e".repeat(64),
+        "workspace_id":key.workspace_id,"target_id":null,
+        "success":null,"completed_at_ms":null
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn create_request_fence_blocks_legacy_downgrade_before_claim() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger.fence(owner.clone(), &"1".repeat(64)).await.unwrap();
+    assert!(matches!(
+        ledger
+            .reserve_legacy(
+                &owner.key,
+                &owner.claim_id,
+                &"1".repeat(64),
+                &legacy_payload(&owner.key),
+                100000
+            )
+            .await,
+        Err(LedgerError::Fenced)
+    ));
+    assert_eq!(count(&pool, "objects").await, 0);
+}
+
+#[tokio::test]
+async fn create_receipt_legacy_admission_keeps_original_bytes_and_refuses_fence_absence() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    let bytes = legacy_payload(&owner.key);
+    assert_eq!(
+        ledger
+            .reserve_legacy(&owner.key, &owner.claim_id, &"1".repeat(64), &bytes, 100000)
+            .await
+            .unwrap(),
+        LegacyReservation::Created
+    );
+    let actual: Vec<u8> = sqlx::query_scalar("SELECT payload FROM objects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(actual, bytes);
+    assert_eq!(
+        ledger
+            .reserve_legacy(
+                &owner.key,
+                &receipt(2).claim_id,
+                &"1".repeat(64),
+                &bytes,
+                100000
+            )
+            .await
+            .unwrap(),
+        LegacyReservation::Contended
+    );
+    assert!(matches!(
+        ledger.fence(owner.clone(), &"1".repeat(64)).await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert_eq!(count(&pool, "sandbox_create_ownership").await, 0);
+    assert_eq!(count(&pool, "objects").await, 1);
+}
+
+#[tokio::test]
+async fn create_receipt_overlapping_legacy_downgrade_waits_for_fence_commit() {
+    let db = ConcurrentLedger::new().await;
+    let owner = receipt(1);
+    let mut tx = db.first.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let mut candidate = owner.clone();
+    candidate.state = ReceiptState::Abandoned;
+    candidate.admission_closed = true;
+    candidate.fence_revision = 1;
+    fence_sqlite_transaction(&mut tx, candidate, &"1".repeat(64))
+        .await
+        .unwrap();
+    let other = CreateReceiptLedger::Sqlite(db.second.clone());
+    let key = "1".repeat(64);
+    let bytes = legacy_payload(&owner.key);
+    let pending = other.reserve_legacy(&owner.key, &owner.claim_id, &key, &bytes, 100000);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), pending)
+            .await
+            .unwrap(),
+        Err(LedgerError::Fenced)
+    ));
+    assert_eq!(count(&db.first, "objects").await, 0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn create_receipt_overlapping_legacy_admission_prevents_fence_absence() {
+    let db = ConcurrentLedger::new().await;
+    let owner = receipt(1);
+    let key = "1".repeat(64);
+    let mut tx = db.first.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    assert_eq!(
+        reserve_legacy_sqlite_transaction(
+            &mut tx,
+            &owner.key,
+            &owner.claim_id,
+            &key,
+            &legacy_payload(&owner.key),
+            100000
+        )
+        .await
+        .unwrap(),
+        LegacyReservation::Created
+    );
+    let other = CreateReceiptLedger::Sqlite(db.second.clone());
+    let pending = other.fence(owner.clone(), &key);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), pending)
+            .await
+            .unwrap(),
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert_eq!(count(&db.first, "objects").await, 1);
+    assert_eq!(count(&db.first, "sandbox_create_ownership").await, 0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn create_receipt_legacy_guard_never_bypasses_pending_owner_or_storage_failure() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    assert!(matches!(
+        ledger.guard_legacy(&owner.key).await,
+        Err(LedgerError::Pending)
+    ));
+    assert!(matches!(
+        ledger
+            .reserve_legacy(
+                &owner.key,
+                &receipt(2).claim_id,
+                &"2".repeat(64),
+                &legacy_payload(&owner.key),
+                100000
+            )
+            .await,
+        Err(LedgerError::Pending)
+    ));
+    sqlx::raw_sql("DROP TABLE sandbox_create_ownership")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        ledger.guard_legacy(&owner.key).await,
+        Err(LedgerError::Unavailable)
+    ));
+    assert!(matches!(
+        ledger
+            .reserve_legacy(
+                &owner.key,
+                &receipt(2).claim_id,
+                &"2".repeat(64),
+                &legacy_payload(&owner.key),
+                100000
+            )
+            .await,
+        Err(LedgerError::Unavailable)
+    ));
+    assert_eq!(count(&pool, "objects").await, 1);
+}
+
+#[tokio::test]
+async fn create_receipt_legacy_guard_preserves_existing_mutation_quota() {
+    let (ledger, pool) = ledger().await;
+    for index in 0..1000 {
+        ledger
+            .reserve(&receipt(index), &format!("{index:064x}"))
+            .await
+            .unwrap();
+    }
+    let next = receipt(1001);
+    assert_eq!(
+        ledger
+            .reserve_legacy(
+                &next.key,
+                &next.claim_id,
+                &format!("{:064x}", 1001),
+                &legacy_payload(&next.key),
+                100000
+            )
+            .await
+            .unwrap(),
+        LegacyReservation::Full
+    );
+    assert_eq!(count(&pool, "objects").await, 1000);
+    assert_eq!(count(&pool, "sandbox_create_ownership").await, 1000);
+}
+
+#[tokio::test]
+async fn create_receipt_legacy_expiry_cannot_become_audited_absence_or_new_owner() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger
+        .reserve_legacy(
+            &owner.key,
+            &owner.claim_id,
+            &"1".repeat(64),
+            &legacy_payload(&owner.key),
+            100000,
+        )
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("DELETE FROM sandbox_create_legacy_keys")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE sandbox_create_legacy_keys SET mutation_key=$1")
+            .bind("f".repeat(64))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM objects WHERE object_type='mutation_admission_v1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        ledger.fence(owner.clone(), &"1".repeat(64)).await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert!(matches!(
+        ledger.reserve(&owner, &"1".repeat(64)).await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert_eq!(count(&pool, "sandbox_create_ownership").await, 0);
+    assert!(matches!(
+        ledger
+            .read(
+                &owner.key,
+                &owner.original_fingerprint,
+                &owner.schema_digest
+            )
+            .await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    // Legacy UUID reuse still follows the existing legacy admission/replay contract.
+    assert_eq!(
+        ledger
+            .reserve_legacy(
+                &owner.key,
+                &receipt(2).claim_id,
+                &"1".repeat(64),
+                &legacy_payload(&owner.key),
+                200000
+            )
+            .await
+            .unwrap(),
+        LegacyReservation::Created
     );
 }

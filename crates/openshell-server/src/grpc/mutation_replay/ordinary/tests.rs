@@ -1260,3 +1260,123 @@ async fn conditional_stop_replays_lost_response_but_conflicts_on_changed_expecta
         );
     }
 }
+
+#[tokio::test]
+async fn create_dispatcher_checks_original_caller_fence_before_legacy_execution() {
+    use crate::grpc::create_receipt::{Receipt, ReceiptKey, ReceiptState};
+    use openshell_core::proto::open_shell_server::OpenShell;
+    use openshell_core::rpc_error::StatusExt;
+    let (_directory, mut state) = protected_state().await;
+    Arc::get_mut(&mut state).unwrap().admin_role = "openshell-admin".into();
+    let request = create_sandbox("fenced-original");
+    let caller = super::super::hash_json(&serde_json::json!(["oidc", "", "dev-user"])).unwrap();
+    let workspace: openshell_core::proto::Workspace = state
+        .store
+        .get_message_by_name("", "default")
+        .await
+        .unwrap()
+        .unwrap();
+    let key = ReceiptKey {
+        caller_hash: caller.clone(),
+        workspace_id: workspace.object_id().into(),
+        request_uuid: request.request_id.clone(),
+    };
+    let mutation_key = super::super::hash_json(&serde_json::json!([
+        caller,
+        "CreateSandbox",
+        "default",
+        request.request_id
+    ]))
+    .unwrap();
+    state
+        .store
+        .create_receipt_ledger()
+        .fence(
+            Receipt {
+                key: key.clone(),
+                claim_id: id(),
+                original_fingerprint: "a".repeat(64),
+                effective_fingerprint: "b".repeat(64),
+                schema_digest: "c".repeat(64),
+                coverage_epoch: id(),
+                state: ReceiptState::Pending,
+                revision: 1,
+                fence_revision: 0,
+                admission_closed: false,
+                created_at_ms: crate::persistence::current_time_ms(),
+            },
+            &mutation_key,
+        )
+        .await
+        .unwrap();
+    let service = crate::grpc::OpenShellService::new(state.clone());
+    let error = service
+        .create_sandbox(authed_request(request.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), "REQUEST_ID_FENCED");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        state
+            .store
+            .get_by_name(
+                "mutation_admission_v1",
+                &format!("_mutation/{caller}"),
+                &mutation_key
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .store
+            .get_message_by_name::<Sandbox>("default", &request.name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut foreign = authed_request(request);
+    let Principal::User(user) = foreign.extensions_mut().get_mut::<Principal>().unwrap() else {
+        panic!("fixture user");
+    };
+    user.identity.subject = "another-user".into();
+    user.identity.roles.clear();
+    // The original caller's tombstone must not be an existence oracle for another caller.
+    let foreign_error = service.create_sandbox(foreign).await.unwrap_err();
+    assert_eq!(foreign_error.code(), Code::PermissionDenied);
+    assert_ne!(
+        foreign_error
+            .get_error_details()
+            .error_info()
+            .map(|info| info.reason.as_str()),
+        Some("REQUEST_ID_FENCED")
+    );
+}
+
+#[tokio::test]
+async fn create_dispatcher_refuses_interceptor_workspace_rebinding() {
+    let (_directory, state) = protected_state().await;
+    let workspace = openshell_core::proto::Workspace {
+        metadata: Some(ObjectMeta {
+            id: id(),
+            name: "other-workspace".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    state.store.put_message(&workspace).await.unwrap();
+    let original = create_sandbox("original-workspace");
+    let mut transformed = original.clone();
+    transformed.workspace_scope = Some(openshell_core::proto::workspace_selector(
+        "other-workspace".to_string(),
+    ));
+    let mut request = authed_request(transformed);
+    request
+        .extensions_mut()
+        .insert(OriginalMutation(original.encode_to_vec()));
+    assert_eq!(
+        reason(&run(&state, request).await.unwrap_err()),
+        "REQUEST_REPLAY_UNAVAILABLE"
+    );
+}

@@ -124,6 +124,15 @@ original owner after a fence and rolling back all writes on a conflict.
 File-backed, independent-connection SQLite tests overlap admission/fence in both
 orders and quota admission at the final slot; PostgreSQL execution is still
 unqualified, not inferred from SQLite results or Rust compilation.
-Public wire/auth handlers, Create-path integration (including flag-downgrade
-fencing), effect transitions, SDKs, trusted observations and journals remain
-pending, so no ownership capability is advertised or enabled by these foundations.
+The authenticated legacy Create dispatcher checks the original caller/workspace/
+UUID before replay and atomically repeats that guard with its mutation admission;
+closed keys refuse execution and pending audited owners cannot be downgraded.
+New legacy admissions retain immutable UUID coverage markers after replay expiry,
+so pruning cannot turn known legacy creation into audited absence or a new owner.
+Legacy payload hashing/replay remains unchanged for unowned keys; older unindexed
+history remains unqualified rather than inferred absent.
+Binding resolves the immutable Workspace ID to its actual name within the
+transaction; PostgreSQL labels use the existing JSONB storage representation.
+Public wire/auth handlers, audited Create/binding/effect integration, SDKs,
+trusted observations and journals remain pending, so no ownership capability is
+advertised or enabled by these foundations.
