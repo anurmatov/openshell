@@ -158,8 +158,13 @@ preserves explicit named-workspace/original-key/immutable-ID binding, and disabl
 ownership RPC replay even under an explicit transport retry policy.
 Its in-memory gRPC regressions cover downgrade, refusal, exact call counts,
 contradictory replies and independent copies; they do not qualify a live gateway.
-Go canonical fingerprint construction and Python/TypeScript curated ownership
-methods remain incomplete alongside trusted observations and retained journals.
+The Go canonical key builder projects the exact original binary request using
+the canonical Rust-exported descriptor closure, rather than Go's runtime
+descriptor metadata; a core regression checks the embedded asset byte for byte.
+Shared canonical/finite-number vectors and an actual generated-client receipt
+read exercise the builder without sending Create or changing its audited flag.
+Python/TypeScript curated ownership methods remain incomplete alongside trusted
+observations and retained journals; source conformance is not runtime proof.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and

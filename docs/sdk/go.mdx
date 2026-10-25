@@ -124,7 +124,9 @@ return lazy pagers so callers choose when to fetch the next page.
 `client.CreateOwnership().Get(ctx, workspace, key, expectedSandboxID)` reads the
 original request's receipt without selecting a same-name replacement.
 `key` contains a canonical request UUID, the original 32-byte fingerprint and
-its schema digest; this client does not yet build canonical fingerprints.
+its schema digest; `CreateOwnershipKeyFromRequest(originalWire, expectedSchemaDigest)`
+builds this key from the original binary request without sending Create or changing
+the audited flag, and refuses a schema mismatch without a legacy fallback.
 
 `client.CreateOwnership().Fence(ctx, workspace, key)` is a separate, explicitly
 authorized metadata operation, not a timeout fallback or cancellation.

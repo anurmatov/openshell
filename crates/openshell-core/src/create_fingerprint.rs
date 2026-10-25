@@ -42,11 +42,11 @@ pub enum FingerprintError {
     Digest,
 }
 
-/// Hash the transitive compiled FileDescriptorSet closure in filename order.
+/// Export the transitive compiled FileDescriptorSet closure in filename order.
 ///
 /// The release vector manifest must pin these measured bytes after the receipt wire is finalized.
 /// No source-file hash or guessed future descriptor digest is substituted here.
-pub fn schema_digest() -> Result<[u8; 32], FingerprintError> {
+pub fn schema_descriptor_set() -> Result<Vec<u8>, FingerprintError> {
     fn collect(
         file: FileDescriptor,
         files: &mut BTreeMap<String, prost_types::FileDescriptorProto>,
@@ -65,11 +65,15 @@ pub fn schema_digest() -> Result<[u8; 32], FingerprintError> {
         .ok_or(FingerprintError::Projection)?;
     let mut files = BTreeMap::new();
     collect(descriptor.parent_file(), &mut files);
-    let bytes = prost_types::FileDescriptorSet {
+    Ok(prost_types::FileDescriptorSet {
         file: files.into_values().collect(),
     }
-    .encode_to_vec();
-    openshell_crypto::sha256(&bytes).map_err(|_| FingerprintError::Digest)
+    .encode_to_vec())
+}
+
+/// Digest the exact compiled projection closure, including descriptor metadata.
+pub fn schema_digest() -> Result<[u8; 32], FingerprintError> {
+    openshell_crypto::sha256(&schema_descriptor_set()?).map_err(|_| FingerprintError::Digest)
 }
 
 /// Project the actual generated request, clearing only request_id before ProtoJSON encoding.
@@ -174,6 +178,14 @@ mod tests {
             manifest["fingerprint_schema_digest"].as_str().unwrap()
         );
         assert_eq!(manifest["format"], FORMAT);
+    }
+
+    #[test]
+    fn go_canonical_descriptor_is_the_exact_compiled_projection() {
+        assert_eq!(
+            schema_descriptor_set().unwrap(),
+            include_bytes!("../../../sdk/go/openshell/v1/create_descriptor.bin")
+        );
     }
 
     #[test]
