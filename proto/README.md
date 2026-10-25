@@ -194,6 +194,16 @@ the old handle. These local indices are not authenticated RPC cursors or
 qualified immutable gateway snapshots; protected report/session integration
 and retained journals remain
 incomplete alongside remaining connected cross-SDK/native consumer oracles.
+The Docker driver now retains partial legacy lifecycle attempts and exact returned
+workload container IDs in a separate private docker-ownership-evidence subtree,
+outside the directory removed by boundary cleanup.
+Writes use per-ID nonblocking file locks, bounded records, atomic replacement and
+file/directory fsync; corrupt, missing or contended state never becomes absence.
+The persisted coverage is always OPEN_UNQUALIFIED: Stop/Delete returns alone do
+not close the manifest or qualify terminal evidence, and capture failure does not
+change legacy operation results.
+Complete component/control-task/engine-incarnation fences, authenticated observer
+reports, gateway snapshot handlers and terminal qualification remain incomplete.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and
