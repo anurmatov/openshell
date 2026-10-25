@@ -263,6 +263,29 @@ pub struct Networking {
 }
 
 impl Networking {
+    /// Freeze local facts through this runtime's actual entrypoint handle.
+    /// This does not qualify the protected supervisor/report/session boundary.
+    #[cfg(target_os = "linux")]
+    pub fn ownership_snapshot(
+        &self,
+    ) -> std::result::Result<crate::ownership::FrozenInventory, crate::ownership::ObservationError>
+    {
+        self.ownership.freeze()
+    }
+
+    /// Read an unchanged frozen local page after a fresh source check.
+    #[cfg(target_os = "linux")]
+    pub fn ownership_snapshot_page(
+        &self,
+        snapshot: &crate::ownership::FrozenInventory,
+        process: usize,
+        socket: usize,
+        size: usize,
+    ) -> std::result::Result<crate::ownership::InventoryPage, crate::ownership::ObservationError>
+    {
+        self.ownership.frozen_page(snapshot, process, socket, size)
+    }
+
     /// Local observations only; never authorizes report trust, poller/broker absence or cleanup.
     #[cfg(target_os = "linux")]
     pub fn ownership_inventory(

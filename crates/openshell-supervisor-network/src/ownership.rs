@@ -42,6 +42,71 @@ pub struct NamespaceInventory {
     pub sockets: Vec<SocketObservation>,
 }
 
+/// Immutable local facts only, not an authenticated gateway snapshot or absence proof.
+/// Construction and reads are private to the collector; workload-provided facts cannot
+/// manufacture this handle. Its five-second lifetime never refreshes on page reads.
+pub struct FrozenInventory {
+    facts: NamespaceInventory,
+    created: Instant,
+}
+
+/// Copies from one frozen inventory; offsets are local indices, not public RPC cursors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InventoryPage {
+    pub processes: Vec<ProcessIdentity>,
+    pub sockets: Vec<SocketObservation>,
+    pub next_process: Option<usize>,
+    pub next_socket: Option<usize>,
+}
+
+impl FrozenInventory {
+    fn new(facts: NamespaceInventory, created: Instant) -> Self {
+        Self { facts, created }
+    }
+
+    fn fresh_at(&self, now: Instant) -> Result<(), ObservationError> {
+        if now
+            .checked_duration_since(self.created)
+            .is_none_or(|age| age >= Duration::from_secs(5))
+        {
+            return Err(ObservationError::Expired);
+        }
+        Ok(())
+    }
+
+    fn verify_at(&self, current: NamespaceInventory, now: Instant) -> Result<(), ObservationError> {
+        self.fresh_at(now)?;
+        if current != self.facts {
+            return Err(ObservationError::Changed);
+        }
+        Ok(())
+    }
+
+    fn page_at(
+        &self,
+        process: usize,
+        socket: usize,
+        size: usize,
+        now: Instant,
+    ) -> Result<InventoryPage, ObservationError> {
+        self.fresh_at(now)?;
+        if !(1..=100).contains(&size) {
+            return Err(ObservationError::Limit);
+        }
+        if process > self.facts.processes.len() || socket > self.facts.sockets.len() {
+            return Err(ObservationError::Changed);
+        }
+        let process_end = process.saturating_add(size).min(self.facts.processes.len());
+        let socket_end = socket.saturating_add(size).min(self.facts.sockets.len());
+        Ok(InventoryPage {
+            processes: self.facts.processes[process..process_end].to_vec(),
+            sockets: self.facts.sockets[socket..socket_end].to_vec(),
+            next_process: (process_end < self.facts.processes.len()).then_some(process_end),
+            next_socket: (socket_end < self.facts.sockets.len()).then_some(socket_end),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ObservationError {
     #[error("OWNERSHIP_SOURCE_UNAVAILABLE")]
@@ -50,6 +115,8 @@ pub enum ObservationError {
     Changed,
     #[error("OWNERSHIP_SOURCE_UNOWNED")]
     Unowned,
+    #[error("OWNERSHIP_SNAPSHOT_EXPIRED")]
+    Expired,
     #[error("OWNERSHIP_SNAPSHOT_LIMIT")]
     Limit,
 }
@@ -66,9 +133,53 @@ impl OwnershipCollector {
         Self { entrypoint }
     }
 
+    /// Freeze two stable source scans; no report/session/placement trust is implied.
+    pub fn freeze(&self) -> Result<FrozenInventory, ObservationError> {
+        self.freeze_at(Path::new("/proc"))
+    }
+
+    fn freeze_at(&self, root: &Path) -> Result<FrozenInventory, ObservationError> {
+        let created = Instant::now();
+        let snapshot = FrozenInventory::new(self.inventory_at(root)?, created);
+        snapshot.fresh_at(Instant::now())?;
+        Ok(snapshot)
+    }
+
+    /// Re-read current source before returning a page; never silently refresh a stale handle.
+    /// This is local-only and cannot replace gateway caller/session/driver validation.
+    pub fn frozen_page(
+        &self,
+        snapshot: &FrozenInventory,
+        process: usize,
+        socket: usize,
+        size: usize,
+    ) -> Result<InventoryPage, ObservationError> {
+        self.frozen_page_at(snapshot, process, socket, size, Path::new("/proc"))
+    }
+
+    fn frozen_page_at(
+        &self,
+        snapshot: &FrozenInventory,
+        process: usize,
+        socket: usize,
+        size: usize,
+        root: &Path,
+    ) -> Result<InventoryPage, ObservationError> {
+        snapshot.fresh_at(Instant::now())?;
+        if !(1..=100).contains(&size) {
+            return Err(ObservationError::Limit);
+        }
+        snapshot.verify_at(self.inventory_at(root)?, Instant::now())?;
+        snapshot.page_at(process, socket, size, Instant::now())
+    }
+
     pub fn inventory(&self) -> Result<NamespaceInventory, ObservationError> {
+        self.inventory_at(Path::new("/proc"))
+    }
+
+    fn inventory_at(&self, root: &Path) -> Result<NamespaceInventory, ObservationError> {
         let pid = self.entrypoint.load(Ordering::Acquire);
-        let facts = collect_at(Path::new("/proc"), pid, || {})?;
+        let facts = collect_at(root, pid, || {})?;
         if self.entrypoint.load(Ordering::Acquire) != pid {
             return Err(ObservationError::Changed);
         }
@@ -520,6 +631,186 @@ mod tests {
                 fs::write(f.0.path().join("netns"), "new namespace").unwrap();
             }),
             Err(ObservationError::Changed)
+        );
+    }
+    #[test]
+    fn ownership_frozen_pages_are_independent_copies() {
+        let f = Fixture::new();
+        f.process(23, 200);
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), Instant::now());
+        let mut page = snapshot.page_at(0, 0, 1, Instant::now()).unwrap();
+        page.processes[0].kernel_boot_id.clear();
+        let repeated = snapshot.page_at(0, 0, 1, Instant::now()).unwrap();
+        assert!(!repeated.processes[0].kernel_boot_id.is_empty());
+        assert_eq!(repeated.next_process, Some(1));
+        assert_eq!(repeated.next_socket, None);
+    }
+
+    #[test]
+    fn ownership_frozen_expiry_is_not_extended_by_reads() {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        assert!(
+            snapshot
+                .page_at(0, 0, 100, now + Duration::from_secs(4))
+                .is_ok()
+        );
+        assert_eq!(
+            snapshot.page_at(0, 0, 100, now + Duration::from_secs(5)),
+            Err(ObservationError::Expired)
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_page_limits_refuse_instead_of_truncating() {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        for size in [0, 101, usize::MAX] {
+            assert_eq!(
+                snapshot.page_at(0, 0, size, now),
+                Err(ObservationError::Limit)
+            );
+        }
+        assert_eq!(
+            snapshot.page_at(2, 0, 1, now),
+            Err(ObservationError::Changed)
+        );
+        assert_eq!(
+            snapshot.page_at(0, 1, 1, now),
+            Err(ObservationError::Changed)
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_source_change_refuses_without_rewriting_snapshot() {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        f.stat(17, 999);
+        assert_eq!(
+            snapshot.verify_at(f.collect().unwrap(), now),
+            Err(ObservationError::Changed)
+        );
+        assert_eq!(
+            snapshot.page_at(0, 0, 1, now).unwrap().processes[0].starttime_ticks,
+            100
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_source_membership_change_is_stale() {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        f.process(23, 200);
+        assert_eq!(
+            snapshot.verify_at(f.collect().unwrap(), now),
+            Err(ObservationError::Changed)
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_current_source_can_be_rechecked() {
+        let f = Fixture::new();
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        assert_eq!(snapshot.verify_at(f.collect().unwrap(), now), Ok(()));
+    }
+
+    #[test]
+    fn ownership_frozen_runtime_refuses_unpublished_source() {
+        let collector = OwnershipCollector::new(Arc::new(AtomicU32::new(0)));
+        assert!(matches!(
+            collector.freeze(),
+            Err(ObservationError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn ownership_frozen_inherited_socket_owner_pages_do_not_drop_owners() {
+        let f = Fixture::new();
+        f.process(23, 200);
+        fs::write(
+            f.0.path().join("17/net/tcp"),
+            "header\n0: 0100007F:C350 0200007F:01BB 01 0 0 0 1000 0 456\n",
+        )
+        .unwrap();
+        for pid in [17, 23] {
+            symlink("socket:[456]", f.0.path().join(format!("{pid}/fd/3"))).unwrap();
+        }
+        let now = Instant::now();
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), now);
+        let page = snapshot.page_at(0, 0, 1, now).unwrap();
+        assert_eq!(page.sockets[0].owners.len(), 2);
+        assert_eq!(page.next_socket, None);
+    }
+    #[test]
+    fn ownership_frozen_expired_handle_refuses_before_source_access() {
+        let f = Fixture::new();
+        let collector = OwnershipCollector::new(Arc::new(AtomicU32::new(0)));
+        let snapshot = FrozenInventory::new(
+            f.collect().unwrap(),
+            Instant::now() - Duration::from_secs(6),
+        );
+        assert_eq!(
+            collector.frozen_page(&snapshot, 0, 0, 1),
+            Err(ObservationError::Expired)
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_invalid_page_refuses_before_source_access() {
+        let f = Fixture::new();
+        let collector = OwnershipCollector::new(Arc::new(AtomicU32::new(0)));
+        let snapshot = FrozenInventory::new(f.collect().unwrap(), Instant::now());
+        assert_eq!(
+            collector.frozen_page(&snapshot, 0, 0, 101),
+            Err(ObservationError::Limit)
+        );
+        assert_eq!(
+            collector.frozen_page(&snapshot, 0, 0, 1),
+            Err(ObservationError::Unavailable)
+        );
+    }
+    #[test]
+    fn ownership_frozen_connected_collector_rechecks_source_before_each_page() {
+        let f = Fixture::new();
+        f.process(23, 200);
+        let pid = Arc::new(AtomicU32::new(17));
+        let collector = OwnershipCollector::new(pid.clone());
+        let snapshot = collector.freeze_at(f.0.path()).unwrap();
+        let first = collector
+            .frozen_page_at(&snapshot, 0, 0, 1, f.0.path())
+            .unwrap();
+        let second = collector
+            .frozen_page_at(&snapshot, first.next_process.unwrap(), 0, 1, f.0.path())
+            .unwrap();
+        assert_eq!(first.processes[0].pid, 17);
+        assert_eq!(second.processes[0].pid, 23);
+        assert_eq!(second.next_process, None);
+        f.stat(17, 999);
+        assert_eq!(
+            collector.frozen_page_at(&snapshot, 0, 0, 1, f.0.path()),
+            Err(ObservationError::Changed)
+        );
+        pid.store(0, Ordering::Release);
+        assert_eq!(
+            collector.frozen_page_at(&snapshot, 0, 0, 1, f.0.path()),
+            Err(ObservationError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn ownership_frozen_connected_missing_source_never_returns_cached_page() {
+        let f = Fixture::new();
+        let collector = OwnershipCollector::new(Arc::new(AtomicU32::new(17)));
+        let snapshot = collector.freeze_at(f.0.path()).unwrap();
+        fs::remove_file(f.0.path().join("17/net/udp6")).unwrap();
+        assert_eq!(
+            collector.frozen_page_at(&snapshot, 0, 0, 1, f.0.path()),
+            Err(ObservationError::Unavailable)
         );
     }
 }

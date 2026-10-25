@@ -187,7 +187,12 @@ uses boot/PID/start-time/namespace/executable identities, and rejects changed
 two-scan inventories, missing procfs data and unowned TCP/UDP sockets.
 It reuses the actual procfs IPv4/IPv6 tuple parser and exposes facts only, not
 qualified report trust, immutable snapshot pages, poller/broker absence or cleanup
-authority; protected report/session integration and retained journals remain
+authority. The runtime handle can freeze these local facts for at most five
+seconds and read independent bounded pages only after a fresh unchanged source
+check; expiry, changed membership and unavailable reads fail without refreshing
+the old handle. These local indices are not authenticated RPC cursors or
+qualified immutable gateway snapshots; protected report/session integration
+and retained journals remain
 incomplete alongside remaining connected cross-SDK/native consumer oracles.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
