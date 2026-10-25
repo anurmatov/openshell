@@ -54,7 +54,8 @@ export function canonicalJSON(value: unknown, depth = 0): string {
       return `{${Object.keys(value)
         .sort()
         .map(
-          (key) => `${canonicalJSON(key, depth + 1)}:${canonicalJSON((value as Record<string, unknown>)[key], depth + 1)}`,
+          (key) =>
+            `${canonicalJSON(key, depth + 1)}:${canonicalJSON((value as Record<string, unknown>)[key], depth + 1)}`,
         )
         .join(',')}}`;
     default:

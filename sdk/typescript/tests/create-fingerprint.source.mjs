@@ -32,7 +32,10 @@ for (const vector of manifest.vectors) {
       assert.equal(key.requestID, requestID);
       assert.equal(Buffer.from(key.fingerprint).toString('hex'), vector.sha256);
       assert.deepEqual(Buffer.from(wire), untouched);
-      clearField(parsed, type.fields.find((field) => field.name === 'request_id'));
+      clearField(
+        parsed,
+        type.fields.find((field) => field.name === 'request_id'),
+      );
     }
     const canonical = canonicalJSON(toJson(type, parsed));
     assert.equal(canonical, vector.canonical);

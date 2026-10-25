@@ -344,9 +344,38 @@ cp /tmp/create_descriptor.bin \
 The source oracle checks the shared descriptor/projection/finite-number vectors
 and refusal/copy behavior; the matching Vitest tests instrument the source module.
 These are source checks, not actual gateway/runtime or broker-absence evidence.
-Curated TypeScript receipt/fence methods, Python parity, trusted observations and
-retained journals remain incomplete; ownership capabilities remain withheld and
+Curated Python receipt/fence parity, trusted observations and retained journals
+remain incomplete; ownership capabilities remain withheld and
 `BROKER_BARRIER_UNQUALIFIED` is unchanged.
+
+## Receipt reads and explicit fences
+
+Reuse the existing authenticated transport, without mutation-retry interceptors:
+
+```typescript
+import {
+  CreateOwnershipClient,
+  createOwnershipKeyFromRequest,
+} from '@nvidia/openshell-sdk';
+
+const ownership = new CreateOwnershipClient(client.transport);
+const key = createOwnershipKeyFromRequest(originalWire, schemaDigest);
+const receipt = await ownership.get('workspace-a', key, expectedSandboxID);
+```
+
+Every operation checks Health again, then sends its ownership RPC once.
+Missing capability, original-key mismatch, contradictory terminal evidence,
+unknown state or wrong immutable ID refuses the result with no fallback.
+Health does not eliminate a downgrade race before the operation; the server must
+still enforce the contract. Cancellation/deadline failures do not authorize retry.
+
+`ownership.fence('workspace-a', key)` is a separate, explicitly authorized metadata
+mutation, not owner cancellation or runtime absence proof. A lost fence reply is
+an error; use `get` for readback rather than resending the fence or Create.
+Incomplete, missing-as-of-read and expired receipts remain incomplete.
+Versions use bigint and timestamps retain seconds/nanoseconds without float loss.
+`complete` refers only to the Create result, never process/poller/broker drainage.
+The client copies request/response bytes rather than retaining caller buffers.
 
 ## Development
 

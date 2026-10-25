@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Public API surface for @nvidia/openshell-sdk.
-//
-export type { CreateOwnershipKey } from './create-fingerprint.js';
-export { createOwnershipKeyFromRequest } from './create-fingerprint.js';
 export type {
   ConnectOptions,
   DeleteOptions,
@@ -70,6 +66,19 @@ export {
   SandboxTemplateClient,
   ServiceAuthorizationMode,
 } from './client.js';
+// Public API surface for @nvidia/openshell-sdk.
+//
+export type { CreateOwnershipKey } from './create-fingerprint.js';
+export { createOwnershipKeyFromRequest } from './create-fingerprint.js';
+export type {
+  CreateEffectState,
+  CreateOwnershipBinding,
+  CreateOwnershipCallOptions,
+  CreateOwnershipReceipt,
+  CreateReceiptState,
+  OwnershipTimestamp,
+} from './create-ownership.js';
+export { CreateOwnershipClient } from './create-ownership.js';
 export type { ErrorInfo, FieldViolation, SdkErrorCode } from './errors.js';
 export { fromConnect, SdkError } from './errors.js';
 export type { ClientCredentialsOptions, OidcTokenProvider } from './oidc.js';

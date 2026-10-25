@@ -170,8 +170,13 @@ Python now also projects original binary Create through the same compiled
 descriptor, preserving only original-request authority and immutable key bytes;
 its source oracle checks the shared projection/finite-number vectors and refuses
 invalid input without importing unrelated HTTP dependencies.
-Curated Python/TypeScript receipt/fence methods remain incomplete alongside
-trusted observations and retained journals; source conformance is not runtime proof.
+The curated TypeScript receipt/fence client reuses the authenticated transport,
+checks capability per operation, copies original keys and validates terminal
+effects/immutable IDs without automatic retry or lifecycle fallback.
+Its generated-transport tests exercise reads, explicit fences, downgrade and
+contradictory replies; source conformance is not runtime proof.
+Curated Python receipt/fence parity remains incomplete alongside trusted
+observations, snapshots and retained journals.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and

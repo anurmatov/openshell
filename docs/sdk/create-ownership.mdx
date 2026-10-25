@@ -13,7 +13,8 @@ This source is incomplete and advertises neither ownership capability.
 - Explicit fence: ABANDONED for a qualified never-admitted key, otherwise FENCED_PENDING while its owner can still finish
 - Receipt reads: fresh authorization and SELECT-only snapshots, with contradictory terminal records refused rather than repaired
 - Retention: 24-hour successful receipts and replay-cache completion, with permanent UUID fences and bindings after cache/resource deletion
-- SDK wire: canonical Go/Python/TypeScript generation and per-operation capability checks on existing Rust receipt/fence methods
+- SDK wire: canonical Go/Python/TypeScript generation; curated Rust, Go and TypeScript receipt/fence methods check capability per operation
+- TypeScript transport: reuse the existing authenticated transport with CreateOwnershipClient; no automatic RPC retry, replacement selection or Create fallback
 
 Trusted observers, retained terminal driver journals, curated cross-SDK conformance and remaining source oracles are still pending.
 PostgreSQL, installed SQL/image/runtime/restore qualification and independent final review remain separate merge requirements, with BROKER_BARRIER_UNQUALIFIED unchanged.
