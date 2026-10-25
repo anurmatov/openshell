@@ -175,8 +175,14 @@ checks capability per operation, copies original keys and validates terminal
 effects/immutable IDs without automatic retry or lifecycle fallback.
 Its generated-transport tests exercise reads, explicit fences, downgrade and
 contradictory replies; source conformance is not runtime proof.
-Curated Python receipt/fence parity remains incomplete alongside trusted
-observations, snapshots and retained journals.
+The curated Python receipt/fence client also reuses the actual caller channel,
+retaining TLS/bearer authentication and per-RPC deadlines, with immutable domain
+records, exact integer/timestamp values and original-key/terminal-effect refusal.
+Its owned generated-gRPC tests connect the public canonical key builder to receipt
+reads across the shared Create vectors; missing capability and transport failures
+never retry or downgrade. These tests are not wheel or installed-runtime proof.
+Trusted observations, snapshots, retained journals and remaining connected
+cross-SDK/native consumer oracles remain incomplete.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and

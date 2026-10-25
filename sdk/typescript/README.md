@@ -344,8 +344,8 @@ cp /tmp/create_descriptor.bin \
 The source oracle checks the shared descriptor/projection/finite-number vectors
 and refusal/copy behavior; the matching Vitest tests instrument the source module.
 These are source checks, not actual gateway/runtime or broker-absence evidence.
-Curated Python receipt/fence parity, trusted observations and retained journals
-remain incomplete; ownership capabilities remain withheld and
+Snapshots, trusted observations, retained journals and remaining connected
+cross-SDK acceptance remain incomplete; ownership capabilities remain withheld and
 `BROKER_BARRIER_UNQUALIFIED` is unchanged.
 
 ## Receipt reads and explicit fences
