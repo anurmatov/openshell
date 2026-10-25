@@ -81,14 +81,17 @@ async fn create_receipt_admission_and_mutation_claim_are_atomic() {
 async fn create_request_fence_wins_and_delayed_admission_has_zero_claims() {
     let (ledger, pool) = ledger().await;
     let row = receipt(1);
-    let fenced = ledger.fence(row.clone()).await.unwrap();
+    let fenced = ledger.fence(row.clone(), &"1".repeat(64)).await.unwrap();
     assert_eq!(fenced.state, ReceiptState::Abandoned);
     assert!(matches!(
         ledger.reserve(&row, &"1".repeat(64)).await,
         Err(LedgerError::Fenced)
     ));
     assert_eq!(count(&pool, "objects").await, 0);
-    assert_eq!(ledger.fence(row.clone()).await.unwrap(), fenced);
+    assert_eq!(
+        ledger.fence(row.clone(), &"1".repeat(64)).await.unwrap(),
+        fenced
+    );
     assert_eq!(
         ledger
             .read(&row.key, &row.original_fingerprint, &row.schema_digest)
@@ -103,11 +106,11 @@ async fn create_request_fence_retains_admitted_owner_and_revision() {
     let (ledger, pool) = ledger().await;
     let row = receipt(1);
     ledger.reserve(&row, &"1".repeat(64)).await.unwrap();
-    let fenced = ledger.fence(row.clone()).await.unwrap();
+    let fenced = ledger.fence(row.clone(), &"1".repeat(64)).await.unwrap();
     assert_eq!(fenced.state, ReceiptState::FencedPending);
     assert_eq!(fenced.claim_id, row.claim_id);
     assert_eq!(fenced.revision, 2);
-    assert_eq!(ledger.fence(row).await.unwrap(), fenced);
+    assert_eq!(ledger.fence(row, &"1".repeat(64)).await.unwrap(), fenced);
     assert_eq!(count(&pool, "objects").await, 1);
 }
 
@@ -127,7 +130,7 @@ async fn create_receipt_missing_and_mismatched_reads_write_nothing() {
     let mut bad = row.clone();
     bad.original_fingerprint = "e".repeat(64);
     assert!(matches!(
-        ledger.fence(bad).await,
+        ledger.fence(bad, &"1".repeat(64)).await,
         Err(LedgerError::Mismatch)
     ));
     assert_eq!(
@@ -144,16 +147,16 @@ async fn create_receipt_missing_and_mismatched_reads_write_nothing() {
 async fn create_request_fence_rate_limit_preserves_rows_and_resets_by_call_time() {
     let (ledger, pool) = ledger().await;
     for index in 0..100 {
-        ledger.fence(receipt(index)).await.unwrap();
+        ledger.fence(receipt(index), &"1".repeat(64)).await.unwrap();
     }
     assert!(matches!(
-        ledger.fence(receipt(101)).await,
+        ledger.fence(receipt(101), &"1".repeat(64)).await,
         Err(LedgerError::FenceRate)
     ));
     assert_eq!(count(&pool, "sandbox_create_ownership").await, 100);
     let mut later = receipt(101);
     later.created_at_ms += 60000;
-    ledger.fence(later).await.unwrap();
+    ledger.fence(later, &"1".repeat(64)).await.unwrap();
     assert_eq!(count(&pool, "sandbox_create_ownership").await, 101);
 }
 
@@ -216,4 +219,19 @@ async fn create_receipt_raw_delete_and_binding_update_are_refused() {
         .await
         .unwrap();
     assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 1);
+}
+
+#[tokio::test]
+async fn create_request_fence_never_reports_absence_for_a_legacy_claim() {
+    let (ledger, pool) = ledger().await;
+    let row = receipt(1);
+    sqlx::query("INSERT INTO objects(id,object_type,name,workspace,payload,created_at_ms,updated_at_ms) VALUES('legacy','mutation_admission_v1',$1,$2,$3,1,1)")
+        .bind("1".repeat(64)).bind(format!("_mutation/{}",row.key.caller_hash))
+        .bind(b"{}".as_slice()).execute(&pool).await.unwrap();
+    assert!(matches!(
+        ledger.fence(row, &"1".repeat(64)).await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert_eq!(count(&pool, "sandbox_create_ownership").await, 0);
+    assert_eq!(count(&pool, "objects").await, 1);
 }

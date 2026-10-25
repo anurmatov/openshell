@@ -22,6 +22,8 @@ pub(crate) enum LedgerError {
     Pending,
     #[error("CREATE_OWNERSHIP_CAP_FULL")]
     Capacity,
+    #[error("UNSUPPORTED_COVERAGE")]
+    UnsupportedCoverage,
     #[error("CREATE_FENCE_RATE_LIMIT")]
     FenceRate,
 }
@@ -175,15 +177,18 @@ impl CreateReceiptLedger {
     }
 
     /// Explicit metadata-only abandonment; never invoked by read or an automatic timeout.
-    pub(crate) async fn fence(&self, mut receipt: Receipt) -> Result<Receipt> {
+    pub(crate) async fn fence(&self, mut receipt: Receipt, mutation_key: &str) -> Result<Receipt> {
+        if !digest(mutation_key) {
+            return Err(LedgerError::Invalid);
+        }
         receipt.validate()?;
         receipt.state = ReceiptState::Abandoned;
         receipt.admission_closed = true;
         receipt.revision = 1;
         receipt.fence_revision = 1;
         match self {
-            Self::Sqlite(pool) => fence_sqlite(pool, receipt).await,
-            Self::Postgres(pool) => fence_postgres(pool, receipt).await,
+            Self::Sqlite(pool) => fence_sqlite(pool, receipt, mutation_key).await,
+            Self::Postgres(pool) => fence_postgres(pool, receipt, mutation_key).await,
         }
     }
 }
@@ -237,7 +242,11 @@ async fn reserve_sqlite(
     Ok(receipt.clone())
 }
 
-async fn fence_sqlite(pool: &SqlitePool, mut receipt: Receipt) -> Result<Receipt> {
+async fn fence_sqlite(
+    pool: &SqlitePool,
+    mut receipt: Receipt,
+    mutation_key: &str,
+) -> Result<Receipt> {
     let now_ms = receipt.created_at_ms;
     let mut tx = pool
         .begin_with("BEGIN IMMEDIATE")
@@ -263,6 +272,14 @@ async fn fence_sqlite(pool: &SqlitePool, mut receipt: Receipt) -> Result<Receipt
         previous.revision += 1;
         previous.fence_revision = 1;
         receipt = previous;
+    }
+    if receipt.state == ReceiptState::Abandoned {
+        let legacy: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
+            .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
+            .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+        if legacy.is_some() {
+            return Err(LedgerError::UnsupportedCoverage);
+        }
     }
     let (window, count): (i64,i64) = sqlx::query_as("SELECT fence_window_ms,fence_count FROM sandbox_create_ownership_callers WHERE caller_hash=$1")
         .bind(&receipt.key.caller_hash).fetch_one(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
@@ -333,7 +350,11 @@ async fn reserve_postgres(pool: &PgPool, receipt: &Receipt, mutation_key: &str) 
     Ok(receipt.clone())
 }
 
-async fn fence_postgres(pool: &PgPool, mut receipt: Receipt) -> Result<Receipt> {
+async fn fence_postgres(
+    pool: &PgPool,
+    mut receipt: Receipt,
+    mutation_key: &str,
+) -> Result<Receipt> {
     let now_ms = receipt.created_at_ms;
     let mut tx = pool.begin().await.map_err(|_| LedgerError::Unavailable)?;
     sqlx::query("INSERT INTO sandbox_create_ownership_callers(caller_hash) VALUES ($1) ON CONFLICT DO NOTHING")
@@ -363,6 +384,14 @@ async fn fence_postgres(pool: &PgPool, mut receipt: Receipt) -> Result<Receipt> 
         previous.revision += 1;
         previous.fence_revision = 1;
         receipt = previous;
+    }
+    if receipt.state == ReceiptState::Abandoned {
+        let legacy: Option<String> = sqlx::query_scalar("SELECT id FROM objects WHERE object_type='mutation_admission_v1' AND name=$1 AND workspace=$2")
+            .bind(mutation_key).bind(format!("_mutation/{}", receipt.key.caller_hash))
+            .fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+        if legacy.is_some() {
+            return Err(LedgerError::UnsupportedCoverage);
+        }
     }
     let (window, count): (i64,i64) = sqlx::query_as("SELECT fence_window_ms,fence_count FROM sandbox_create_ownership_callers WHERE caller_hash=$1")
         .bind(&receipt.key.caller_hash).fetch_one(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
