@@ -17,6 +17,7 @@ openshell-extension-core = { path = "../openshell-extension-core" }
 openshell-policy-schema = { path = "../openshell-policy-schema" }
 glob = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true }
 prost-types = { workspace = true }
 tonic = { workspace = true, features = ["channel"] }
 tonic-prost = { workspace = true }
@@ -27,6 +28,8 @@ thiserror = { workspace = true }
 miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# ECMAScript number spelling for the audited RFC 8785 fingerprint only.
+ryu-js = "=1.0.2"
 sha2 = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

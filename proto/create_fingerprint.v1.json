@@ -1,0 +1,353 @@
+{
+  "format": "create-payload-json-v1",
+  "fingerprint_schema_digest": "bbf866007c576090f5bff3659300d6a96b4b9796a38c348e57c618e08300733f",
+  "qualification": "source-foundation-only; receipt wire and cross-SDK conformance pending",
+  "descriptor_encoding": "transitive FileDescriptorSet in filename order, unmodified compiled FileDescriptorProto messages",
+  "vectors": [
+    {
+      "name": "empty",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {},
+      "unknown_wire_hex": "",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "request-id-excluded",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "requestId": "00000000-0000-4000-8000-000000000001"
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "scalar-default-omitted",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "awaitMainProcessAttachment": false
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "present-empty-message",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {}
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{}}",
+      "sha256": "53aa778a9b137a0ca7ab79937d069870b14440dae5922f51d940ffa4b178d5cb"
+    },
+    {
+      "name": "optional-absent",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "template": {}
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"template\":{}}}",
+      "sha256": "c2a698e7853b1579c0fc2d6bdeacb229856342def7ca13ac7674b795ddcd531a"
+    },
+    {
+      "name": "optional-false",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "template": {
+            "userNamespaces": false
+          }
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"template\":{\"userNamespaces\":false}}}",
+      "sha256": "bb4f79c488796564bcf61ee692d881bb7b4720cf2cec4b95bc1d812a2fc3b16d"
+    },
+    {
+      "name": "optional-zero",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "resourceRequirements": {
+            "gpu": {
+              "count": 0
+            }
+          }
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"resourceRequirements\":{\"gpu\":{\"count\":0}}}}",
+      "sha256": "d32ec6a6af74a0ce0abd087bedd100c38da5de22dac7553006f07bcc471ed6f4"
+    },
+    {
+      "name": "repeated-order",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "providers": [
+            "provider-b",
+            "provider-a"
+          ],
+          "command": [
+            "echo",
+            "fixture"
+          ]
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"command\":[\"echo\",\"fixture\"],\"providers\":[\"provider-b\",\"provider-a\"]}}",
+      "sha256": "9098ec3e0b92144f9b129228d32e61d294fe0f7545526331780e8ebd5f4c9db8"
+    },
+    {
+      "name": "unicode-and-map-order",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "labels": {
+          "": "bmp",
+          "𐀀": "supplementary",
+          "é": "decomposed",
+          "é": "composed"
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"labels\":{\"é\":\"decomposed\",\"é\":\"composed\",\"𐀀\":\"supplementary\",\"\":\"bmp\"}}",
+      "sha256": "20582c069acd525961ee00bcc5ad84964814de9b212c5e3555c1bf3fdd9f2b42"
+    },
+    {
+      "name": "unknown-enum-number",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "restartPolicy": 999
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"restartPolicy\":999}}",
+      "sha256": "b59ac8631a026a74ae16fb2b65ec0edb0bf8d8bad2fbb311bc8e09f1c805bfd0"
+    },
+    {
+      "name": "oneof-default-string",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "workspaceScope": {
+          "workspace": ""
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"workspaceScope\":{\"workspace\":\"\"}}",
+      "sha256": "07414192667a71e898373a994ef69ee38226cb9d2d3d4b1ab5e49b332b7b3c4c"
+    },
+    {
+      "name": "struct-finite-floats",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "template": {
+            "resources": {
+              "tiny": 1e-07,
+              "fixed": 1e+20,
+              "negativeZero": -0.0
+            }
+          }
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"template\":{\"resources\":{\"fixed\":100000000000000000000,\"negativeZero\":0,\"tiny\":1e-7}}}}",
+      "sha256": "aa86f792dee8be37f0af5bee143ee7eb03ccae308bb359a0cd409f1f71934657"
+    },
+    {
+      "name": "unknown-wire-field",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {},
+      "unknown_wire_hex": "a00601",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "int64-min",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "intValue": "-9223372036854775808"
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"intValue\":\"-9223372036854775808\"}",
+      "sha256": "7654522bc68aafc194cce0c954bd117c31dc9505376476400ec2a5ebd809c11e"
+    },
+    {
+      "name": "int64-max",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "intValue": "9223372036854775807"
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"intValue\":\"9223372036854775807\"}",
+      "sha256": "04ecef795a2959964262fefe8dbd9baf1064e4bd309623f9b407510031de8921"
+    },
+    {
+      "name": "bytes-padded-base64",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "bytesValue": "AQIDBA=="
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"bytesValue\":\"AQIDBA==\"}",
+      "sha256": "753962b24c0040354438fceda0a44edf16cf215f5b1210e836f6735e9270efc6"
+    },
+    {
+      "name": "oneof-false",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "boolValue": false
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"boolValue\":false}",
+      "sha256": "b2590800400b6b38d3f34c194ac24eb327335e5dd7a46240b50243d4f97d5d74"
+    },
+    {
+      "name": "known-enum-name",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "spec": {
+          "restartPolicy": "SANDBOX_RESTART_POLICY_NEVER"
+        }
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"spec\":{\"restartPolicy\":\"SANDBOX_RESTART_POLICY_NEVER\"}}",
+      "sha256": "728ab94859badbb448225a7c13362ae2c06d872703002f9340a66383f36b79c2"
+    },
+    {
+      "name": "uint64-max",
+      "message_type": "openshell.datamodel.v1.ObjectMeta",
+      "input": {
+        "resourceVersion": "18446744073709551615"
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"resourceVersion\":\"18446744073709551615\"}",
+      "sha256": "c71d3b5dce7e1e4d0343763fc4183a666435c80df9f2e68144c6af7600b809c3"
+    },
+    {
+      "name": "oneof-empty-bytes",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "bytesValue": ""
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"bytesValue\":\"\"}",
+      "sha256": "9a098b0045938eeb630b3ae65945c56fe7194f1b74cfcd01daea87ae14d9f1f1"
+    },
+    {
+      "name": "oneof-int64-zero",
+      "message_type": "openshell.sandbox.v1.SettingValue",
+      "input": {
+        "intValue": "0"
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"intValue\":\"0\"}",
+      "sha256": "38d18ede01e0ea711435985ac85d668d41c7550270c066f44adfff71d952407f"
+    }
+  ],
+  "number_vectors": [
+    {
+      "ieee754_hex": "0000000000000000",
+      "canonical": "0"
+    },
+    {
+      "ieee754_hex": "8000000000000000",
+      "canonical": "0"
+    },
+    {
+      "ieee754_hex": "0000000000000001",
+      "canonical": "5e-324"
+    },
+    {
+      "ieee754_hex": "8000000000000001",
+      "canonical": "-5e-324"
+    },
+    {
+      "ieee754_hex": "7fefffffffffffff",
+      "canonical": "1.7976931348623157e+308"
+    },
+    {
+      "ieee754_hex": "ffefffffffffffff",
+      "canonical": "-1.7976931348623157e+308"
+    },
+    {
+      "ieee754_hex": "4340000000000000",
+      "canonical": "9007199254740992"
+    },
+    {
+      "ieee754_hex": "c340000000000000",
+      "canonical": "-9007199254740992"
+    },
+    {
+      "ieee754_hex": "4430000000000000",
+      "canonical": "295147905179352830000"
+    },
+    {
+      "ieee754_hex": "44b52d02c7e14af5",
+      "canonical": "9.999999999999997e+22"
+    },
+    {
+      "ieee754_hex": "44b52d02c7e14af6",
+      "canonical": "1e+23"
+    },
+    {
+      "ieee754_hex": "44b52d02c7e14af7",
+      "canonical": "1.0000000000000001e+23"
+    },
+    {
+      "ieee754_hex": "444b1ae4d6e2ef4e",
+      "canonical": "999999999999999700000"
+    },
+    {
+      "ieee754_hex": "444b1ae4d6e2ef4f",
+      "canonical": "999999999999999900000"
+    },
+    {
+      "ieee754_hex": "444b1ae4d6e2ef50",
+      "canonical": "1e+21"
+    },
+    {
+      "ieee754_hex": "3eb0c6f7a0b5ed8c",
+      "canonical": "9.999999999999997e-7"
+    },
+    {
+      "ieee754_hex": "3eb0c6f7a0b5ed8d",
+      "canonical": "0.000001"
+    },
+    {
+      "ieee754_hex": "41b3de4355555553",
+      "canonical": "333333333.3333332"
+    },
+    {
+      "ieee754_hex": "41b3de4355555554",
+      "canonical": "333333333.33333325"
+    },
+    {
+      "ieee754_hex": "41b3de4355555555",
+      "canonical": "333333333.3333333"
+    },
+    {
+      "ieee754_hex": "41b3de4355555556",
+      "canonical": "333333333.3333334"
+    },
+    {
+      "ieee754_hex": "41b3de4355555557",
+      "canonical": "333333333.33333343"
+    },
+    {
+      "ieee754_hex": "becbf647612f3696",
+      "canonical": "-0.0000033333333333333333"
+    },
+    {
+      "ieee754_hex": "43143ff3c1cb0959",
+      "canonical": "1424953923781206.2"
+    }
+  ],
+  "number_vectors_source": "https://www.rfc-editor.org/rfc/rfc8785.html#appendix-B"
+}

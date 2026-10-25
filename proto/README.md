@@ -109,3 +109,15 @@ control, process I/O, and network mediation over the bound boundary. Both are
 supervisor-to-backend contracts, not gateway RPCs. Backend authors can generate bindings independently
 from these definitions. The negotiated Sandbox Protocol version covers the gRPC
 services, typed messages, streaming, and lifecycle semantics.
+
+## Create fingerprint foundation
+
+`openshell-core::create_fingerprint` projects the generated Create request through
+its compiled descriptor, removes `request_id`, and applies the separately versioned
+`create-payload-json-v1` encoding without changing legacy replay hashes.
+`create_fingerprint.v1.json` pins the current compiled descriptor closure and
+canonical bytes/hashes, with additional typed projection profiles for integer,
+bytes and oneof rules and RFC 8785 finite-number vectors.
+This is a source foundation only: receipt/fence wire and durable admission,
+SDK conformance, ownership observers and terminal journals remain pending, and
+no ownership capability is advertised or enabled by these helpers.
