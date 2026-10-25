@@ -1430,6 +1430,7 @@ fn spawn_create_sandbox(app: &mut App, tx: mpsc::UnboundedSender<Event>) {
         };
 
         let req = openshell_core::proto::CreateSandboxRequest {
+            require_ownership_receipt: false,
             request_id: String::new(),
             name,
             spec: Some(openshell_core::proto::SandboxSpec {

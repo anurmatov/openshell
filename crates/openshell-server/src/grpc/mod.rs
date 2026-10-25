@@ -5,6 +5,7 @@
 
 mod auth_rpc;
 pub(crate) mod create_receipt;
+mod create_request_fence;
 pub mod mutation_replay;
 pub mod policy;
 pub mod provider;
@@ -12,6 +13,10 @@ mod provider_credentials;
 pub mod provider_readiness;
 mod sandbox;
 pub mod supervisor_host;
+use openshell_core::proto::{
+    FenceSandboxCreateRequest, FenceSandboxCreateResponse, GetSandboxCreateReceiptRequest,
+    GetSandboxCreateReceiptResponse,
+};
 pub use sandbox::mint_persisted_authentication;
 mod service;
 mod validation;
@@ -321,7 +326,31 @@ impl OpenShell for OpenShellService {
         &self,
         request: Request<CreateSandboxRequest>,
     ) -> Result<Response<SandboxResponse>, Status> {
+        let original_requires_receipt = request
+            .extensions()
+            .get::<mutation_replay::OriginalMutation>()
+            .map(|original| <CreateSandboxRequest as prost::Message>::decode(original.0.as_slice()))
+            .transpose()
+            .map_err(|_| Status::internal("original Create unavailable"))?
+            .is_some_and(|original| original.require_ownership_receipt);
+        if request.get_ref().require_ownership_receipt || original_requires_receipt {
+            return create_request_fence::reject_unqualified_create(&self.state, request).await;
+        }
         mutation_replay::run(&self.state, request).await
+    }
+
+    async fn get_sandbox_create_receipt(
+        &self,
+        request: Request<GetSandboxCreateReceiptRequest>,
+    ) -> Result<Response<GetSandboxCreateReceiptResponse>, Status> {
+        create_request_fence::get(&self.state, request).await
+    }
+
+    async fn fence_sandbox_create(
+        &self,
+        request: Request<FenceSandboxCreateRequest>,
+    ) -> Result<Response<FenceSandboxCreateResponse>, Status> {
+        create_request_fence::fence(&self.state, request).await
     }
 
     async fn begin_rootfs_tar_staging(

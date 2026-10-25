@@ -21,6 +21,10 @@
 pub use openshell_core::proto;
 pub use openshell_core::proto::open_shell_client::OpenShellClient as GrpcClient;
 pub use openshell_core::proto::{
+    CreateEffectState, CreateOwnershipBinding, CreateReceiptState, FenceSandboxCreateRequest,
+    FenceSandboxCreateResponse, GetSandboxCreateReceiptRequest, GetSandboxCreateReceiptResponse,
+};
+pub use openshell_core::proto::{
     CreateSandboxRequest, CreateSandboxTemplateRequest, CreateWorkspaceRequest,
     DeleteSandboxRequest, DeleteSandboxTemplateRequest, DeleteWorkspaceRequest, ExecSandboxRequest,
     GetSandboxProviderStatusRequest, GetSandboxProviderStatusResponse, GetSandboxRequest,

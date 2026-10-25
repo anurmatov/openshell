@@ -53,6 +53,26 @@ service OpenShell {
     };
   }
 
+  // SELECT-only lookup for the original authenticated Create owner.
+  rpc GetSandboxCreateReceipt(GetSandboxCreateReceiptRequest)
+      returns (GetSandboxCreateReceiptResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:read"
+      workspace_role: "user"
+    };
+  }
+
+  // Explicit metadata-only admission fence; never cancels an admitted owner.
+  rpc FenceSandboxCreate(FenceSandboxCreateRequest)
+      returns (FenceSandboxCreateResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      workspace_role: "user"
+    };
+  }
+
   // Allocate a gateway-owned staging slot for a local rootfs tar archive.
   //
   // The gateway creates a request-scoped directory inside the compute driver's
@@ -1307,6 +1327,8 @@ message CreateSandboxRequest {
   // registered after the sandbox has been persisted and route only while the
   // sandbox is ready.
   repeated SandboxServiceExposure service_exposures = 9;
+  // Fail closed unless the gateway qualifies sandbox-create-ownership-v1.
+  bool require_ownership_receipt = 10;
 }
 
 message CreateSandboxTemplateRequest {
@@ -4142,4 +4164,66 @@ message EndpointFailure {
   // Supervisor-minted UUID of the refused exchange. The workload receives the
   // same value in the x-openshell-request-id response header.
   string request_id = 8;
+}
+
+// Receipt ownership never implies runtime readiness or broker drain.
+enum CreateReceiptState {
+  CREATE_RECEIPT_STATE_UNSPECIFIED = 0;
+  CREATE_RECEIPT_STATE_PENDING = 1;
+  CREATE_RECEIPT_STATE_SUCCEEDED = 2;
+  CREATE_RECEIPT_STATE_AMBIGUOUS = 3;
+  CREATE_RECEIPT_STATE_NO_RESOURCE = 4;
+  CREATE_RECEIPT_STATE_EXPIRED = 5;
+  CREATE_RECEIPT_STATE_NOT_FOUND_AS_OF_READ = 6;
+  CREATE_RECEIPT_STATE_UNSUPPORTED_COVERAGE = 7;
+  CREATE_RECEIPT_STATE_ABANDONED = 8;
+  CREATE_RECEIPT_STATE_FENCED_PENDING = 9;
+}
+enum CreateEffectState {
+  CREATE_EFFECT_STATE_UNSPECIFIED = 0;
+  CREATE_EFFECT_STATE_NOT_STARTED = 1;
+  CREATE_EFFECT_STATE_RESOURCE_COMMITTED = 2;
+  CREATE_EFFECT_STATE_DRIVER_STARTED = 3;
+  CREATE_EFFECT_STATE_OWNER_TERMINAL = 4;
+}
+message GetSandboxCreateReceiptRequest {
+  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
+  string request_id = 2;
+  bytes payload_fingerprint = 3;
+  optional string expected_sandbox_id = 4;
+  string fingerprint_schema_digest = 5;
+}
+message CreateOwnershipBinding {
+  string claim_incarnation_id = 1;
+  string sandbox_id = 2;
+  uint64 initial_resource_version = 3;
+  optional uint64 current_resource_version = 4;
+  string current_state = 5;
+  CreateEffectState effect_state = 6;
+  uint64 binding_revision = 7;
+}
+message GetSandboxCreateReceiptResponse {
+  CreateReceiptState receipt_state = 1;
+  string request_id = 2;
+  bytes fingerprint = 3;
+  uint64 receipt_revision = 4;
+  google.protobuf.Timestamp created_at = 5;
+  optional google.protobuf.Timestamp completed_at = 6;
+  optional google.protobuf.Timestamp expires_at = 7;
+  string coverage_epoch = 8;
+  repeated CreateOwnershipBinding bindings = 9;
+  bool complete = 10;
+  string fingerprint_schema_digest = 11;
+  uint64 fence_revision = 12;
+  bool admission_closed = 13;
+  string reason_code = 14;
+}
+message FenceSandboxCreateRequest {
+  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
+  string request_id = 2;
+  bytes payload_fingerprint = 3;
+  string fingerprint_schema_digest = 4;
+}
+message FenceSandboxCreateResponse {
+  GetSandboxCreateReceiptResponse receipt = 1;
 }

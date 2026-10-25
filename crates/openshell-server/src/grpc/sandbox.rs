@@ -6841,6 +6841,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "collision".to_string(),
                 spec: Some(SandboxSpec {
@@ -6919,6 +6920,7 @@ mod tests {
         let response = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "user-catalog".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -6954,6 +6956,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "orphan-sandbox".to_string(),
                 spec: Some(SandboxSpec {
@@ -7036,6 +7039,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "reserved-policy-key".to_string(),
                 spec: Some(SandboxSpec {
@@ -7419,6 +7423,7 @@ mod tests {
         let response = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "annotated".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -7479,6 +7484,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "reserved".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -7804,6 +7810,7 @@ mod tests {
         let response = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "partial-id".to_string(),
                 spec: Some(SandboxSpec {
@@ -7875,6 +7882,7 @@ mod tests {
         let response = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "kube-partial-id".to_string(),
                 spec: Some(SandboxSpec {
@@ -7914,6 +7922,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "bad-label".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -7955,6 +7964,7 @@ mod tests {
             handle_create_sandbox(
                 &task_state,
                 authed_request(CreateSandboxRequest {
+                    require_ownership_receipt: false,
                     request_id: String::new(),
                     name: "guarded-create".to_string(),
                     spec: Some(SandboxSpec {
@@ -8612,6 +8622,7 @@ mod tests {
         let created = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "from-template".to_string(),
                 spec: Some(SandboxSpec {
@@ -8707,6 +8718,7 @@ mod tests {
         let created = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "from-template".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -8761,6 +8773,7 @@ mod tests {
         let created = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "from-template".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -8802,6 +8815,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "from-corrupt".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -8841,6 +8855,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "bad-template-create".to_string(),
                 spec: Some(SandboxSpec {
@@ -8871,6 +8886,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "bad-template-create".to_string(),
                 spec: Some(SandboxSpec::default()),
@@ -8898,6 +8914,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "bad-template-create".to_string(),
                 spec: Some(SandboxSpec {
@@ -8928,6 +8945,7 @@ mod tests {
         let err = handle_create_sandbox(
             &state,
             authed_request(CreateSandboxRequest {
+                require_ownership_receipt: false,
                 request_id: String::new(),
                 name: "bad-direct-create".to_string(),
                 spec: Some(SandboxSpec {

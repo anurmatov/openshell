@@ -888,3 +888,31 @@ async fn create_receipt_legacy_expiry_cannot_become_audited_absence_or_new_owner
         LegacyReservation::Created
     );
 }
+
+#[tokio::test]
+async fn create_receipt_snapshot_keeps_binding_and_revision_in_one_read() {
+    let (ledger, pool) = binding_ledger().await;
+    let owner = receipt(1);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    ledger
+        .bind_resource(&owner, &sandbox(1, "snapshot-owned"))
+        .await
+        .unwrap();
+    let before = count(&pool, "objects").await;
+    let snapshot = ledger
+        .read_snapshot(
+            &owner.key,
+            &owner.original_fingerprint,
+            &owner.schema_digest,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.receipt.revision, 2);
+    assert_eq!(
+        snapshot.bindings,
+        vec![(sandbox(1, "unused").metadata.unwrap().id, 1, 1)]
+    );
+    assert!(!snapshot.receipt.admission_closed);
+    assert_eq!(before, count(&pool, "objects").await);
+}

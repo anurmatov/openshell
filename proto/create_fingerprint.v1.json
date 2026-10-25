@@ -1,7 +1,7 @@
 {
   "format": "create-payload-json-v1",
-  "fingerprint_schema_digest": "bbf866007c576090f5bff3659300d6a96b4b9796a38c348e57c618e08300733f",
-  "qualification": "source-foundation-only; receipt wire and cross-SDK conformance pending",
+  "fingerprint_schema_digest": "a8f3d557163161f5707f0471a93478e0da444ed1b86b38c0f53494637992c39d",
+  "qualification": "partial receipt wire; capabilities withheld; cross-SDK conformance pending",
   "descriptor_encoding": "transitive FileDescriptorSet in filename order, unmodified compiled FileDescriptorProto messages",
   "vectors": [
     {
@@ -249,6 +249,26 @@
       "unknown_wire_hex": "",
       "canonical": "{\"intValue\":\"0\"}",
       "sha256": "38d18ede01e0ea711435985ac85d668d41c7550270c066f44adfff71d952407f"
+    },
+    {
+      "name": "receipt-default-legacy",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "requireOwnershipReceipt": false
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "receipt-required",
+      "message_type": "openshell.v1.CreateSandboxRequest",
+      "input": {
+        "requireOwnershipReceipt": true
+      },
+      "unknown_wire_hex": "",
+      "canonical": "{\"requireOwnershipReceipt\":true}",
+      "sha256": "434e381fbaf4b1490c3b356f4defbb27ee20bb7ce8bac08b130a6ed3eab66d36"
     }
   ],
   "number_vectors": [

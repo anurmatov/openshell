@@ -133,6 +133,16 @@ Legacy payload hashing/replay remains unchanged for unowned keys; older unindexe
 history remains unqualified rather than inferred absent.
 Binding resolves the immutable Workspace ID to its actual name within the
 transaction; PostgreSQL labels use the existing JSONB storage representation.
-Public wire/auth handlers, audited Create/binding/effect integration, SDKs,
-trusted observations and journals remain pending, so no ownership capability is
-advertised or enabled by these foundations.
+The additive receipt/fence wire uses bearer scope plus fresh named-workspace and
+original-caller authorization, reads revisions/bindings in one database snapshot,
+and refuses missing/unqualified coverage rather than inventing absence.
+Explicit fencing applies only to an existing covered owner; reads never fence.
+Audited Create field 10 fails closed, including interceptor flag downgrade, until
+coverage initialization and the audited execution/effect path are complete.
+Rust workspace SDK methods check Health per operation and send each receipt/fence
+RPC once without automatic mutation retry; other-language generation is pending.
+The public inventory and canonical Create descriptor manifest are remeasured;
+durable/overlap inventories and legacy false-request hashes remain unchanged.
+Audited Create/binding/effect integration, generated Go/Python/TypeScript SDK
+qualification, trusted observations and journals remain incomplete, so neither
+ownership capability is advertised or enabled.

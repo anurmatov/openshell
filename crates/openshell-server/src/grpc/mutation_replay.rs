@@ -156,13 +156,7 @@ pub(super) async fn run<M: Mutation>(
     }
     let request_id = validate_request_id(request.get_ref().request_id())?;
     let principal = super::extract_principal(&request)?;
-    let Some(identity) = principal.user_identity() else {
-        return Err(crate::auth::audit::deny(
-            &principal,
-            crate::auth::audit::AuthzDenial::MethodNotPermitted,
-            "request admission requires a user principal",
-        ));
-    };
+    let caller = authenticated_caller_hash(state, &principal)?;
     let scope = original.authorize(state, &principal).await?;
     #[cfg(test)]
     if let Some(barrier) = request.extensions().get::<Arc<AuthorizationBarrier>>() {
@@ -194,27 +188,6 @@ pub(super) async fn run<M: Mutation>(
     } else {
         (fingerprint(original)?, None)
     };
-    let (provider, issuer) = match identity.provider {
-        IdentityProvider::Oidc => (
-            "oidc",
-            state
-                .config
-                .oidc
-                .as_ref()
-                .map_or("", |config| config.issuer.as_str()),
-        ),
-        IdentityProvider::Mtls => (
-            if matches!(principal, Principal::Operator(_)) {
-                "mtls-operator"
-            } else {
-                "mtls"
-            },
-            "",
-        ),
-        IdentityProvider::CloudflareAccess => ("cloudflare_access", ""),
-        IdentityProvider::LocalDev => ("local_dev", ""),
-    };
-    let caller = hash_json(&serde_json::json!([provider, issuer, identity.subject,]))?;
     // Not a valid user workspace name; ordinary workspace cleanup cannot touch
     // these records. The bucket supports an atomic per-caller storage quota.
     let bucket = format!("_mutation/{caller}");
@@ -506,7 +479,7 @@ async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
     Ok(removed)
 }
 
-fn validate_request_id(value: &str) -> Result<String, Status> {
+pub(super) fn validate_request_id(value: &str) -> Result<String, Status> {
     let invalid = || {
         rpc_error::invalid_argument(
             "request_id",
@@ -880,4 +853,52 @@ fn create_guard_error(error: super::create_receipt::LedgerError) -> Status {
         super::create_receipt::LedgerError::Pending => uncertain(),
         _ => Status::unavailable("create ownership admission guard unavailable"),
     }
+}
+
+/// Caller authority is gateway-established identity, never a request body field.
+pub(super) fn authenticated_caller_hash(
+    state: &ServerState,
+    principal: &Principal,
+) -> Result<String, Status> {
+    let Some(identity) = principal.user_identity() else {
+        return Err(crate::auth::audit::deny(
+            &principal,
+            crate::auth::audit::AuthzDenial::MethodNotPermitted,
+            "request admission requires a user principal",
+        ));
+    };
+    let (provider, issuer) = match identity.provider {
+        IdentityProvider::Oidc => (
+            "oidc",
+            state
+                .config
+                .oidc
+                .as_ref()
+                .map_or("", |config| config.issuer.as_str()),
+        ),
+        IdentityProvider::Mtls => (
+            if matches!(principal, Principal::Operator(_)) {
+                "mtls-operator"
+            } else {
+                "mtls"
+            },
+            "",
+        ),
+        IdentityProvider::CloudflareAccess => ("cloudflare_access", ""),
+        IdentityProvider::LocalDev => ("local_dev", ""),
+    };
+    hash_json(&serde_json::json!([provider, issuer, identity.subject,]))
+}
+
+pub(super) fn create_mutation_key(
+    caller: &str,
+    workspace: &str,
+    request_id: &str,
+) -> Result<String, Status> {
+    hash_json(&serde_json::json!([
+        caller,
+        "CreateSandbox",
+        workspace,
+        request_id
+    ]))
 }

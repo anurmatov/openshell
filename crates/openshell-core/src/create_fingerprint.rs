@@ -333,3 +333,52 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod ownership_wire_tests {
+    use super::*;
+
+    #[test]
+    fn create_receipt_wire_preserves_additive_field_numbers_and_authority_boundaries() {
+        let request = CreateSandboxRequest {
+            require_ownership_receipt: true,
+            ..Default::default()
+        };
+        let message = DESCRIPTORS
+            .get_message_by_name("openshell.v1.CreateSandboxRequest")
+            .unwrap();
+        assert_eq!(
+            message
+                .get_field_by_name("require_ownership_receipt")
+                .unwrap()
+                .number(),
+            10
+        );
+        assert!(
+            canonical_payload(&request, &schema_digest().unwrap())
+                .unwrap()
+                .windows(b"requireOwnershipReceipt".len())
+                .any(|part| part == b"requireOwnershipReceipt")
+        );
+        let lookup = crate::proto::GetSandboxCreateReceiptRequest {
+            expected_sandbox_id: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(lookup.expected_sandbox_id, Some(String::new()));
+        let response = DESCRIPTORS
+            .get_message_by_name("openshell.v1.GetSandboxCreateReceiptResponse")
+            .unwrap();
+        for (name, number) in [
+            ("receipt_state", 1),
+            ("fingerprint", 3),
+            ("bindings", 9),
+            ("complete", 10),
+            ("fingerprint_schema_digest", 11),
+            ("fence_revision", 12),
+            ("admission_closed", 13),
+            ("reason_code", 14),
+        ] {
+            assert_eq!(response.get_field_by_name(name).unwrap().number(), number);
+        }
+    }
+}

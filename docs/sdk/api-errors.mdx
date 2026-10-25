@@ -342,3 +342,12 @@ the resulting sandbox, profile import/update return resources and diagnostics,
 and config updates return version/application information. Their supplementary
 booleans are not the sole result. Internal compute-driver and supervisor
 contracts are separate from this public API migration.
+
+## Create ownership qualification
+
+`UNSUPPORTED_COVERAGE` means ownership evidence is not qualified, not that a
+request created no resource; retain the original UUID and never resend Create
+or invoke a fence automatically after a lookup or timeout.
+`FINGERPRINT_SCHEMA_MISMATCH` refuses another compiled descriptor closure before
+receipt effects, while `REQUEST_ID_PAYLOAD_MISMATCH` refuses another original
+fingerprint and an expected immutable-ID mismatch returns `ABORTED`.

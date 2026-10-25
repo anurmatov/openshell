@@ -1172,6 +1172,54 @@ impl WorkspaceScopedClient {
         sandbox_from_response(response.sandbox)
     }
 
+    /// SELECT-only request-bound ownership. No lifecycle operation or fence is sent.
+    pub async fn get_sandbox_create_receipt(
+        &self,
+        mut request: proto::GetSandboxCreateReceiptRequest,
+    ) -> Result<proto::GetSandboxCreateReceiptResponse> {
+        self.require_create_ownership().await?;
+        request.workspace_scope = Some(proto::workspace_selector(&self.workspace));
+        // One explicit send: no automatic lookup/mutation retry or returned URL.
+        self.client
+            .raw_grpc()
+            .get_sandbox_create_receipt(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(map_status)
+    }
+
+    /// Explicit caller-authorized metadata fence; never invoked by a read/timeout.
+    pub async fn fence_sandbox_create(
+        &self,
+        mut request: proto::FenceSandboxCreateRequest,
+    ) -> Result<proto::FenceSandboxCreateResponse> {
+        self.require_create_ownership().await?;
+        request.workspace_scope = Some(proto::workspace_selector(&self.workspace));
+        // Deliberately bypass unary's automatic auth-refresh retry for this mutation.
+        self.client
+            .raw_grpc()
+            .fence_sandbox_create(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(map_status)
+    }
+
+    async fn require_create_ownership(&self) -> Result<()> {
+        if !self
+            .client
+            .health()
+            .await?
+            .capabilities
+            .iter()
+            .any(|value| value == "sandbox-create-ownership-v1")
+        {
+            return Err(SdkError::invalid_config(
+                "gateway lacks sandbox-create-ownership-v1; ownership RPC refused",
+            ));
+        }
+        Ok(())
+    }
+
     async fn require_conditional_mutations(&self) -> Result<()> {
         let health = self.client.health().await?;
         if !health
@@ -1439,6 +1487,7 @@ fn create_sandbox_request(spec: SandboxSpec) -> proto::CreateSandboxRequest {
         gpu: Some(proto::GpuResourceRequirements { count: None }),
     });
     proto::CreateSandboxRequest {
+        require_ownership_receipt: false,
         request_id: String::new(),
         spec: Some(proto::SandboxSpec {
             environment,
@@ -1483,6 +1532,7 @@ fn create_sandbox_from_template_request(
         service_exposures,
     } = spec;
     proto::CreateSandboxRequest {
+        require_ownership_receipt: false,
         request_id: String::new(),
         spec: Some(proto::SandboxSpec {
             providers,

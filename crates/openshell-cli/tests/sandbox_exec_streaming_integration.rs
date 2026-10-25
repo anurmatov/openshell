@@ -163,6 +163,13 @@ macro_rules! mock_gateway {
     ) => {
         #[tonic::async_trait]
         impl OpenShell for MockGateway {
+    async fn get_sandbox_create_receipt(&self, _request: tonic::Request<openshell_core::proto::GetSandboxCreateReceiptRequest>) -> Result<tonic::Response<openshell_core::proto::GetSandboxCreateReceiptResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("receipt fixture not configured"))
+    }
+    async fn fence_sandbox_create(&self, _request: tonic::Request<openshell_core::proto::FenceSandboxCreateRequest>) -> Result<tonic::Response<openshell_core::proto::FenceSandboxCreateResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("fence fixture not configured"))
+    }
+
             $(async fn $method(&self, _: Request<$request>) -> Result<Response<$response>, Status> {
                 Err(Status::unimplemented("unused test RPC"))
             })*

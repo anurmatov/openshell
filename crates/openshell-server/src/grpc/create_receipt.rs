@@ -116,6 +116,12 @@ fn decode(payload: &str, key: &ReceiptKey, fingerprint: &str, schema: &str) -> R
     Ok(receipt)
 }
 
+#[derive(Debug)]
+pub(crate) struct ReceiptSnapshot {
+    pub receipt: Receipt,
+    pub bindings: Vec<(String, i64, i64)>,
+}
+
 /// Legacy replay retains its format and quota; this guard grants only one new owner.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LegacyReservation {
@@ -208,6 +214,23 @@ impl CreateReceiptLedger {
         match self {
             Self::Sqlite(pool) => reserve_sqlite(pool, receipt, mutation_key).await,
             Self::Postgres(pool) => reserve_postgres(pool, receipt, mutation_key).await,
+        }
+    }
+
+    /// Receipt revision and bindings are read from one repeatable, SELECT-only snapshot.
+    pub(crate) async fn read_snapshot(
+        &self,
+        key: &ReceiptKey,
+        fingerprint: &str,
+        schema: &str,
+    ) -> Result<Option<ReceiptSnapshot>> {
+        key.validate()?;
+        if !digest(fingerprint) || !digest(schema) {
+            return Err(LedgerError::Invalid);
+        }
+        match self {
+            Self::Sqlite(pool) => snapshot_sqlite(pool, key, fingerprint, schema).await,
+            Self::Postgres(pool) => snapshot_postgres(pool, key, fingerprint, schema).await,
         }
     }
 
@@ -890,4 +913,70 @@ async fn reserve_legacy_postgres(
         .execute(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
     tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
     Ok(LegacyReservation::Created)
+}
+
+async fn snapshot_sqlite(
+    pool: &SqlitePool,
+    key: &ReceiptKey,
+    fingerprint: &str,
+    schema: &str,
+) -> Result<Option<ReceiptSnapshot>> {
+    let mut tx = pool.begin().await.map_err(|_| LedgerError::Unavailable)?;
+    let payload: Option<String> = sqlx::query_scalar("SELECT payload FROM sandbox_create_ownership WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    let Some(payload) = payload else {
+        let legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+            .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+        if legacy.is_some() {
+            return Err(LedgerError::UnsupportedCoverage);
+        }
+        return Ok(None);
+    };
+    let receipt = decode(&payload, key, fingerprint, schema)?;
+    // One extra row detects the wire cap; all bindings remain retained in storage.
+    let bindings: Vec<(String,i64,i64)> = sqlx::query_as("SELECT sandbox_id,initial_resource_version,binding_revision FROM sandbox_create_ownership_bindings WHERE claim_id=$1 ORDER BY sandbox_id LIMIT 17")
+        .bind(&receipt.claim_id).fetch_all(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if bindings
+        .iter()
+        .any(|(id, version, revision)| !uuid(id) || *version < 1 || *revision < 1)
+    {
+        return Err(LedgerError::Corrupt);
+    }
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(Some(ReceiptSnapshot { receipt, bindings }))
+}
+
+async fn snapshot_postgres(
+    pool: &PgPool,
+    key: &ReceiptKey,
+    fingerprint: &str,
+    schema: &str,
+) -> Result<Option<ReceiptSnapshot>> {
+    let mut tx = pool.begin().await.map_err(|_| LedgerError::Unavailable)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| LedgerError::Unavailable)?;
+    let payload: Option<String> = sqlx::query_scalar("SELECT payload FROM sandbox_create_ownership WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+        .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    let Some(payload) = payload else {
+        let legacy: Option<String> = sqlx::query_scalar("SELECT mutation_key FROM sandbox_create_legacy_keys WHERE caller_hash=$1 AND workspace_id=$2 AND request_uuid=$3")
+            .bind(&key.caller_hash).bind(&key.workspace_id).bind(&key.request_uuid).fetch_optional(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+        if legacy.is_some() {
+            return Err(LedgerError::UnsupportedCoverage);
+        }
+        return Ok(None);
+    };
+    let receipt = decode(&payload, key, fingerprint, schema)?;
+    // One extra row detects the wire cap; all bindings remain retained in storage.
+    let bindings: Vec<(String,i64,i64)> = sqlx::query_as("SELECT sandbox_id,initial_resource_version,binding_revision FROM sandbox_create_ownership_bindings WHERE claim_id=$1 ORDER BY sandbox_id LIMIT 17")
+        .bind(&receipt.claim_id).fetch_all(&mut *tx).await.map_err(|_| LedgerError::Unavailable)?;
+    if bindings
+        .iter()
+        .any(|(id, version, revision)| !uuid(id) || *version < 1 || *revision < 1)
+    {
+        return Err(LedgerError::Corrupt);
+    }
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(Some(ReceiptSnapshot { receipt, bindings }))
 }

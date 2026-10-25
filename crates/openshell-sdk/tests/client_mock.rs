@@ -47,6 +47,8 @@ fn selects_all_workspaces(scope: &Option<proto::datamodel::v1::WorkspaceSelector
 #[derive(Default)]
 struct MockState {
     capabilities: Vec<String>,
+    receipt_calls: AtomicU32,
+    fence_calls: AtomicU32,
     stop_calls: AtomicU32,
     delete_calls: AtomicU32,
     last_delete: Mutex<Option<proto::DeleteSandboxRequest>>,
@@ -238,6 +240,37 @@ fn workload_template_proto(name: &str, workspace: &str) -> proto::SandboxWorkloa
 
 #[tonic::async_trait]
 impl OpenShell for TestOpenShell {
+    async fn get_sandbox_create_receipt(
+        &self,
+        _request: tonic::Request<openshell_core::proto::GetSandboxCreateReceiptRequest>,
+    ) -> Result<
+        tonic::Response<openshell_core::proto::GetSandboxCreateReceiptResponse>,
+        tonic::Status,
+    > {
+        self.state.receipt_calls.fetch_add(1, Ordering::SeqCst);
+        let request = _request.into_inner();
+        assert_eq!(
+            selected_workspace(&request.workspace_scope),
+            Some("default")
+        );
+        Ok(Response::new(proto::GetSandboxCreateReceiptResponse {
+            receipt_state: proto::CreateReceiptState::Pending.into(),
+            request_id: request.request_id,
+            fingerprint: request.payload_fingerprint,
+            fingerprint_schema_digest: request.fingerprint_schema_digest,
+            complete: false,
+            ..Default::default()
+        }))
+    }
+    async fn fence_sandbox_create(
+        &self,
+        _request: tonic::Request<openshell_core::proto::FenceSandboxCreateRequest>,
+    ) -> Result<tonic::Response<openshell_core::proto::FenceSandboxCreateResponse>, tonic::Status>
+    {
+        self.state.fence_calls.fetch_add(1, Ordering::SeqCst);
+        Err(tonic::Status::unauthenticated("owned one-send fixture"))
+    }
+
     async fn peer_notify_config_update(
         &self,
         _request: tonic::Request<proto::PeerNotifyConfigUpdateRequest>,
@@ -2499,4 +2532,70 @@ async fn conditional_mutations_send_exact_preconditions_and_workspace_after_capa
     );
     assert_eq!(state.stop_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.delete_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ownership_capability_downgrade_sends_zero_receipt_or_fence_rpcs() {
+    for capabilities in [vec![], vec!["sandbox-create-ownership-v2".into()]] {
+        let state = Arc::new(MockState {
+            capabilities,
+            ..Default::default()
+        });
+        let endpoint = start_mock(state.clone()).await;
+        let client = connect(&endpoint).await;
+        let workspace = client.workspace("default");
+        assert!(
+            workspace
+                .get_sandbox_create_receipt(proto::GetSandboxCreateReceiptRequest::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            workspace
+                .fence_sandbox_create(proto::FenceSandboxCreateRequest::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(state.receipt_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.fence_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn ownership_read_never_fences_and_explicit_fence_is_sent_once() {
+    let state = Arc::new(MockState {
+        capabilities: vec!["sandbox-create-ownership-v1".into()],
+        ..Default::default()
+    });
+    let endpoint = start_mock(state.clone()).await;
+    let client = connect(&endpoint).await;
+    let workspace = client.workspace("default");
+    let request = proto::GetSandboxCreateReceiptRequest {
+        request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        payload_fingerprint: vec![7; 32],
+        ..Default::default()
+    };
+    let read = workspace
+        .get_sandbox_create_receipt(request.clone())
+        .await
+        .unwrap();
+    assert_eq!(read.request_id, request.request_id);
+    assert_eq!(
+        read.receipt_state,
+        proto::CreateReceiptState::Pending as i32
+    );
+    assert!(!read.complete);
+    assert_eq!(state.receipt_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.fence_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        workspace
+            .fence_sandbox_create(proto::FenceSandboxCreateRequest {
+                request_id: request.request_id,
+                payload_fingerprint: request.payload_fingerprint,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(state.fence_calls.load(Ordering::SeqCst), 1);
 }

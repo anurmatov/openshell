@@ -101,6 +101,25 @@ struct TestOpenShell {
 
 #[tonic::async_trait]
 impl OpenShell for TestOpenShell {
+    async fn get_sandbox_create_receipt(
+        &self,
+        _request: tonic::Request<openshell_core::proto::GetSandboxCreateReceiptRequest>,
+    ) -> Result<
+        tonic::Response<openshell_core::proto::GetSandboxCreateReceiptResponse>,
+        tonic::Status,
+    > {
+        Err(tonic::Status::unimplemented(
+            "receipt fixture not configured",
+        ))
+    }
+    async fn fence_sandbox_create(
+        &self,
+        _request: tonic::Request<openshell_core::proto::FenceSandboxCreateRequest>,
+    ) -> Result<tonic::Response<openshell_core::proto::FenceSandboxCreateResponse>, tonic::Status>
+    {
+        Err(tonic::Status::unimplemented("fence fixture not configured"))
+    }
+
     async fn peer_notify_config_update(
         &self,
         _request: tonic::Request<openshell_core::proto::PeerNotifyConfigUpdateRequest>,
