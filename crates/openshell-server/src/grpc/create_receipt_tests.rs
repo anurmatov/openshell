@@ -235,3 +235,364 @@ async fn create_request_fence_never_reports_absence_for_a_legacy_claim() {
     assert_eq!(count(&pool, "sandbox_create_ownership").await, 0);
     assert_eq!(count(&pool, "objects").await, 1);
 }
+
+fn sandbox(index: u128, name: &str) -> openshell_core::proto::Sandbox {
+    openshell_core::proto::Sandbox {
+        metadata: Some(openshell_core::proto::ObjectMeta {
+            id: uuid::Uuid::from_u128(index + 20001).to_string(),
+            name: name.into(),
+            workspace: "workspace-a".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn create_receipt_binding_commits_sandbox_and_owner_after_fence() {
+    use prost::Message;
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    ledger.fence(owner.clone(), &"1".repeat(64)).await.unwrap();
+    let resource = sandbox(1, "owned");
+    let bound = ledger.bind_resource(&owner, &resource).await.unwrap();
+    assert_eq!(bound.metadata.as_ref().unwrap().resource_version, 1);
+    let bytes: Vec<u8> =
+        sqlx::query_scalar("SELECT payload FROM objects WHERE object_type='sandbox'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        openshell_core::proto::Sandbox::decode(bytes.as_slice()).unwrap(),
+        bound
+    );
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 1);
+    let current = ledger
+        .read(
+            &owner.key,
+            &owner.original_fingerprint,
+            &owner.schema_digest,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.state, ReceiptState::FencedPending);
+    assert!(current.admission_closed);
+    assert_eq!(current.revision, 3);
+    assert!(
+        ledger
+            .bind_resource(&owner, &sandbox(2, "second"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "objects").await, 2);
+    // Live resource deletion cannot erase the immutable binding.
+    sqlx::query("DELETE FROM objects WHERE object_type='sandbox'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 1);
+}
+
+#[tokio::test]
+async fn create_receipt_binding_refuses_foreign_owner_and_rolls_back_conflict() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    let mut foreign = owner.clone();
+    foreign.claim_id = receipt(2).claim_id;
+    assert!(
+        ledger
+            .bind_resource(&foreign, &sandbox(1, "shared"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 0);
+    ledger
+        .bind_resource(&owner, &sandbox(1, "shared"))
+        .await
+        .unwrap();
+    let second = receipt(2);
+    ledger.reserve(&second, &"2".repeat(64)).await.unwrap();
+    assert!(
+        ledger
+            .bind_resource(&second, &sandbox(2, "shared"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 1);
+    assert_eq!(
+        ledger
+            .read(
+                &second.key,
+                &second.original_fingerprint,
+                &second.schema_digest
+            )
+            .await
+            .unwrap(),
+        Some(second.clone())
+    );
+    ledger
+        .bind_resource(&second, &sandbox(2, "different"))
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 2);
+}
+
+// Independent pools to a real owned SQLite file: no shared single-connection
+// mutex can mask missing database transaction serialization.
+struct ConcurrentLedger {
+    path: std::path::PathBuf,
+    first: SqlitePool,
+    second: SqlitePool,
+}
+impl ConcurrentLedger {
+    async fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("create-ownership-{}.sqlite", uuid::Uuid::new_v4()));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::from_secs(3));
+        let first = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        for sql in [
+            include_str!("../../migrations/sqlite/001_create_objects.sql"),
+            include_str!("../../migrations/sqlite/004_add_object_metadata.sql"),
+            include_str!("../../migrations/sqlite/005_add_resource_version.sql"),
+            include_str!("../../migrations/sqlite/006_add_workspace_column.sql"),
+            include_str!("../../migrations/sqlite/009_create_ownership_receipts.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(&first).await.unwrap();
+        }
+        let second = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        Self {
+            path,
+            first,
+            second,
+        }
+    }
+    async fn close(self) {
+        self.first.close().await;
+        self.second.close().await;
+        std::fs::remove_file(self.path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn create_receipt_overlapping_connections_admission_then_fence_retains_owner() {
+    let db = ConcurrentLedger::new().await;
+    let owner = receipt(1);
+    let key = "1".repeat(64);
+    // Execute the actual production admission transaction body, but hold its
+    // commit while a different connection is attempting the production fence.
+    let mut tx = db.first.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    reserve_sqlite_transaction(&mut tx, &owner, &key)
+        .await
+        .unwrap();
+    let other = CreateReceiptLedger::Sqlite(db.second.clone());
+    let pending = other.fence(owner.clone(), &key);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(4), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.claim_id, owner.claim_id);
+    assert_eq!(result.state, ReceiptState::FencedPending);
+    assert_eq!(result.revision, 2);
+    assert_eq!(count(&db.first, "objects").await, 1);
+    assert_eq!(count(&db.first, "sandbox_create_ownership").await, 1);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn create_receipt_overlapping_connections_fence_then_admission_has_no_claim() {
+    let db = ConcurrentLedger::new().await;
+    let owner = receipt(1);
+    let key = "1".repeat(64);
+    let mut tx = db.first.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    // The public internal fence wrapper normalizes a fresh request this way.
+    let mut candidate = owner.clone();
+    candidate.state = ReceiptState::Abandoned;
+    candidate.admission_closed = true;
+    candidate.fence_revision = 1;
+    fence_sqlite_transaction(&mut tx, candidate, &key)
+        .await
+        .unwrap();
+    let other = CreateReceiptLedger::Sqlite(db.second.clone());
+    let pending = other.reserve(&owner, &key);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), pending)
+            .await
+            .unwrap(),
+        Err(LedgerError::Fenced)
+    ));
+    assert_eq!(count(&db.first, "objects").await, 0);
+    assert_eq!(count(&db.first, "sandbox_create_ownership").await, 1);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn create_receipt_overlapping_connections_quota_accepts_only_last_slot() {
+    let db = ConcurrentLedger::new().await;
+    let ledger = CreateReceiptLedger::Sqlite(db.first.clone());
+    for index in 1..1000 {
+        ledger
+            .reserve(&receipt(index), &format!("{index:064x}"))
+            .await
+            .unwrap();
+    }
+    let owner = receipt(1000);
+    let mut tx = db.first.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    reserve_sqlite_transaction(&mut tx, &owner, &format!("{:064x}", 1000))
+        .await
+        .unwrap();
+    let other = CreateReceiptLedger::Sqlite(db.second.clone());
+    let next = receipt(1001);
+    let next_key = format!("{:064x}", 1001);
+    let pending = other.reserve(&next, &next_key);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), pending)
+            .await
+            .unwrap(),
+        Err(LedgerError::Capacity)
+    ));
+    assert_eq!(count(&db.first, "sandbox_create_ownership").await, 1000);
+    assert_eq!(count(&db.first, "objects").await, 1000);
+    assert_eq!(
+        other
+            .read(&next.key, &next.original_fingerprint, &next.schema_digest)
+            .await
+            .unwrap(),
+        None
+    );
+    drop(ledger);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn create_receipt_binding_failure_after_insert_rolls_back_every_write() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    // Fail after Sandbox and binding insertion, at mutation-claim enrichment.
+    sqlx::raw_sql("CREATE TRIGGER fail_claim_update BEFORE UPDATE ON objects WHEN OLD.object_type='mutation_admission_v1' BEGIN SELECT RAISE(ABORT, 'owned injected failure'); END")
+        .execute(&pool).await.unwrap();
+    assert!(
+        ledger
+            .bind_resource(&owner, &sandbox(1, "owned"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "objects").await, 1);
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 0);
+    assert_eq!(
+        ledger
+            .read(
+                &owner.key,
+                &owner.original_fingerprint,
+                &owner.schema_digest
+            )
+            .await
+            .unwrap(),
+        Some(owner)
+    );
+}
+
+#[tokio::test]
+async fn create_receipt_binding_requires_an_admitted_owner_and_matching_workspace() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(1);
+    assert!(
+        ledger
+            .bind_resource(&owner, &sandbox(1, "owned"))
+            .await
+            .is_err()
+    );
+    ledger.fence(owner.clone(), &"1".repeat(64)).await.unwrap();
+    assert!(
+        ledger
+            .bind_resource(&owner, &sandbox(1, "owned"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "objects").await, 0);
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 0);
+    let second = receipt(2);
+    ledger.reserve(&second, &"2".repeat(64)).await.unwrap();
+    let mut wrong_workspace = sandbox(2, "foreign");
+    wrong_workspace.metadata.as_mut().unwrap().workspace = "workspace-b".into();
+    assert!(
+        ledger
+            .bind_resource(&second, &wrong_workspace)
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "objects").await, 1);
+}
+
+#[tokio::test]
+async fn create_receipt_binding_cannot_reassign_a_deleted_sandbox_id() {
+    let (ledger, pool) = ledger().await;
+    let first = receipt(1);
+    ledger.reserve(&first, &"1".repeat(64)).await.unwrap();
+    ledger
+        .bind_resource(&first, &sandbox(1, "original"))
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM objects WHERE object_type='sandbox'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let next = receipt(2);
+    ledger.reserve(&next, &"2".repeat(64)).await.unwrap();
+    assert!(
+        ledger
+            .bind_resource(&next, &sandbox(1, "replacement"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&pool, "objects").await, 2); // only the two admission claims
+    assert_eq!(count(&pool, "sandbox_create_ownership_bindings").await, 1);
+    let claim: String =
+        sqlx::query_scalar("SELECT claim_id FROM sandbox_create_ownership_bindings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(claim, first.claim_id);
+    assert_eq!(
+        ledger
+            .read(&next.key, &next.original_fingerprint, &next.schema_digest)
+            .await
+            .unwrap(),
+        Some(next)
+    );
+}

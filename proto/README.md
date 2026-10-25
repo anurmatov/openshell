@@ -118,6 +118,12 @@ without changing legacy replay hashes.
 The additive ownership schema and internal ledger reserve admission plus its
 mutation claim in one transaction, serialize explicit fences, retain immutable
 keys/bindings, and expose SELECT-only lookup through the existing durable pools.
-Public wire/auth handlers, atomic resource binding, downgrade guards, SDKs,
-trusted observations and journals remain pending, so no ownership capability is
-advertised or enabled by these foundations.
+The internal binding transaction writes the actual Sandbox at initial version 1,
+its immutable binding and the admitted mutation target together, retaining the
+original owner after a fence and rolling back all writes on a conflict.
+File-backed, independent-connection SQLite tests overlap admission/fence in both
+orders and quota admission at the final slot; PostgreSQL execution is still
+unqualified, not inferred from SQLite results or Rust compilation.
+Public wire/auth handlers, Create-path integration (including flag-downgrade
+fencing), effect transitions, SDKs, trusted observations and journals remain
+pending, so no ownership capability is advertised or enabled by these foundations.
