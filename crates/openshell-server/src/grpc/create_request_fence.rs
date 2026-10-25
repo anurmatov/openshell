@@ -101,6 +101,15 @@ fn response(
         }
     }
     let row = snapshot.receipt;
+    // A terminal enum alone cannot prove that creation admission ended without
+    // effects. Reject contradictory durable evidence without repairing a read.
+    if row.state == ReceiptState::Abandoned
+        && (!row.admission_closed || row.fence_revision <= 0 || !snapshot.bindings.is_empty())
+    {
+        return Err(Status::unavailable(
+            "inconsistent abandoned ownership evidence",
+        ));
+    }
     let exceeded = snapshot.bindings.len() > 16;
     let state = if exceeded {
         CreateReceiptState::Ambiguous
@@ -253,13 +262,19 @@ mod tests {
     use openshell_core::proto::open_shell_server::OpenShell;
     use openshell_core::rpc_error::StatusExt;
 
-    async fn fixture() -> (Arc<ServerState>, GetSandboxCreateReceiptRequest, Receipt) {
+    pub(super) async fn fixture() -> (Arc<ServerState>, GetSandboxCreateReceiptRequest, Receipt) {
         let state = test_server_state().await;
         let request = authed_request(());
-        let (mut key, _) = owner(&state, &request, None).await.unwrap();
+        let workspace_scope = Some(WorkspaceSelector {
+            selection: Some(workspace_selector::Selection::Workspace("default".into())),
+        });
+        let (mut key, _) = owner(&state, &request, workspace_scope.as_ref())
+            .await
+            .unwrap();
         key.request_uuid = uuid::Uuid::new_v4().to_string();
         let schema = hex::encode(openshell_core::create_fingerprint::schema_digest().unwrap());
         let lookup = GetSandboxCreateReceiptRequest {
+            workspace_scope,
             request_id: key.request_uuid.clone(),
             payload_fingerprint: vec![3; 32],
             fingerprint_schema_digest: schema.clone(),
@@ -375,11 +390,14 @@ mod tests {
         let ledger = state.store.create_receipt_ledger();
         ledger.reserve(&row, &"1".repeat(64)).await.unwrap();
         lookup.payload_fingerprint = vec![8; 32];
-        assert!(
-            OpenShellService::new(state)
-                .fence_sandbox_create(authed_request(fence_request(&lookup)))
-                .await
-                .is_err()
+        let status = OpenShellService::new(state)
+            .fence_sandbox_create(authed_request(fence_request(&lookup)))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "REQUEST_ID_PAYLOAD_MISMATCH"
         );
         assert_eq!(
             ledger
@@ -396,12 +414,11 @@ mod tests {
         request
             .extensions_mut()
             .insert(crate::auth::principal::Principal::Anonymous);
-        assert!(
-            OpenShellService::new(state)
-                .get_sandbox_create_receipt(request)
-                .await
-                .is_err()
-        );
+        let status = OpenShellService::new(state)
+            .get_sandbox_create_receipt(request)
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
     #[tokio::test]
     async fn binding_read_is_not_runtime_readiness_or_expected_id_replacement() {
@@ -446,21 +463,26 @@ mod tests {
         let (state, mut lookup, _) = fixture().await;
         lookup.fingerprint_schema_digest = "0".repeat(64);
         let service = OpenShellService::new(state);
-        assert!(
-            service
-                .get_sandbox_create_receipt(authed_request(lookup.clone()))
-                .await
-                .is_err()
+        let status = service
+            .get_sandbox_create_receipt(authed_request(lookup.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "FINGERPRINT_SCHEMA_MISMATCH"
         );
-        assert!(
-            service
-                .create_sandbox(authed_request(CreateSandboxRequest {
-                    require_ownership_receipt: true,
-                    request_id: lookup.request_id,
-                    ..Default::default()
-                }))
-                .await
-                .is_err()
+        let status = service
+            .create_sandbox(authed_request(CreateSandboxRequest {
+                workspace_scope: lookup.workspace_scope,
+                require_ownership_receipt: true,
+                request_id: lookup.request_id,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            status.get_error_details().error_info().unwrap().reason,
+            "UNSUPPORTED_COVERAGE"
         );
         assert!(
             !service
@@ -478,6 +500,7 @@ mod tests {
         use prost::Message;
         let (state, lookup, _) = fixture().await;
         let original = CreateSandboxRequest {
+            workspace_scope: lookup.workspace_scope,
             require_ownership_receipt: true,
             request_id: lookup.request_id,
             ..Default::default()
@@ -498,5 +521,90 @@ mod tests {
             status.get_error_details().error_info().unwrap().reason,
             "UNSUPPORTED_COVERAGE"
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::grpc::create_receipt::CreateReceiptLedger;
+    use crate::grpc::test_support::authed_request;
+
+    #[tokio::test]
+    async fn abandoned_requires_closed_positive_fence_and_no_bindings_without_lookup_writes() {
+        for closed in [false, true] {
+            for fence_revision in [0, 1] {
+                for bound in [false, true] {
+                    let (state, lookup, mut row) = tests::fixture().await;
+                    let ledger = state.store.create_receipt_ledger();
+                    ledger.reserve(&row, &"1".repeat(64)).await.unwrap();
+                    if bound {
+                        let sandbox = Sandbox {
+                            metadata: Some(ObjectMeta {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name: "terminal-binding".into(),
+                                workspace: "default".into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        };
+                        ledger.bind_resource(&row, &sandbox).await.unwrap();
+                    }
+                    row.state = ReceiptState::Abandoned;
+                    row.admission_closed = closed;
+                    row.fence_revision = fence_revision;
+                    let CreateReceiptLedger::Sqlite(pool) = &ledger else {
+                        panic!("SQLite fixture");
+                    };
+                    let payload = serde_json::to_string(&row).unwrap();
+                    sqlx::query("UPDATE sandbox_create_ownership SET state='ABANDONED',admission_closed=$1,fence_revision=$2,payload=$3 WHERE claim_id=$4")
+                        .bind(closed).bind(fence_revision).bind(&payload).bind(&row.claim_id)
+                        .execute(pool).await.unwrap();
+                    let before = ledger
+                        .read_snapshot(&row.key, &row.original_fingerprint, &row.schema_digest)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let changes: i64 = sqlx::query_scalar("SELECT total_changes()")
+                        .fetch_one(pool)
+                        .await
+                        .unwrap();
+                    let result = get(&state, authed_request(lookup)).await;
+                    if closed && fence_revision > 0 && !bound {
+                        let read = result.unwrap().into_inner();
+                        assert_eq!(read.receipt_state, CreateReceiptState::Abandoned as i32);
+                        assert!(read.complete && read.admission_closed);
+                        assert_eq!(read.fence_revision, 1);
+                        assert!(read.bindings.is_empty());
+                    } else {
+                        let status = result.unwrap_err();
+                        assert_eq!(
+                            status.code(),
+                            tonic::Code::Unavailable,
+                            "closed={closed},fence={fence_revision},bound={bound}"
+                        );
+                        assert_eq!(
+                            status.message(),
+                            "inconsistent abandoned ownership evidence"
+                        );
+                    }
+                    let after = ledger
+                        .read_snapshot(&row.key, &row.original_fingerprint, &row.schema_digest)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(before.receipt, after.receipt);
+                    assert_eq!(before.bindings, after.bindings);
+                    let after_changes: i64 = sqlx::query_scalar("SELECT total_changes()")
+                        .fetch_one(pool)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        changes, after_changes,
+                        "lookup must not repair corrupt evidence"
+                    );
+                }
+            }
+        }
     }
 }

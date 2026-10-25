@@ -3,8 +3,8 @@ title: "Create ownership (partial source)"
 description: "Request-bound ownership does not authorize runtime readiness or retries."
 ---
 
-`GetSandboxCreateReceipt` is SELECT-only, while `FenceSandboxCreate` is an explicit metadata operation that closes admission without cancelling an existing owner; both require fresh named-workspace authorization and bind the authenticated provider/issuer/subject to the original UUID, fingerprint and compiled schema.
+`GetSandboxCreateReceipt` is SELECT-only, while `FenceSandboxCreate` is an explicit metadata operation that closes admission without cancelling an existing owner; both require fresh named-workspace authorization and bind the authenticated provider/issuer/subject to the original UUID, fingerprint and compiled schema; `ABANDONED` is complete only with closed admission, a positive fence revision and no bindings, while contradictory records return `UNAVAILABLE` without repair writes.
 
 Rust workspace clients check `sandbox-create-ownership-v1` on the configured gateway for each call and send no receipt/fence RPC on downgrade, with no automatic fence retry, while missing or unqualified history is refused rather than reported absent and a committed binding never implies driver completion, readiness or broker drain.
 
-This source is incomplete and advertises neither ownership capability: audited Create, coverage initialization, effect completion, other-language generated SDK qualification, trusted observers and retained terminal journals remain pending, with PostgreSQL and installed SQL/image/runtime/restore acceptance separate and `BROKER_BARRIER_UNQUALIFIED` unchanged.
+This source is incomplete and advertises neither ownership capability: audited Create, coverage initialization, effect completion, curated Go/Python/TypeScript client conformance (the Go receipt/fence wire bindings are regenerated, not capability-enabled), trusted observers and retained terminal journals remain pending, with PostgreSQL and installed SQL/image/runtime/restore acceptance separate and `BROKER_BARRIER_UNQUALIFIED` unchanged.
