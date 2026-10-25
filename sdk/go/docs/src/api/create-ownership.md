@@ -18,6 +18,7 @@ A lost fence reply remains uncertain and requires a separate authorized `Get`, n
 
 The result preserves receipt revisions, admission/fence state, optional times, binding versions and incomplete/expired/unsupported states.
 Malformed, foreign or contradictory replies are errors, not ownership or absence.
+Successful and expired receipts must retain a terminal owner effect and completion timestamp; `Complete=false` does not bypass this check.
 `NOT_FOUND_AS_OF_READ` remains incomplete because a delayed Create may still arrive.
 `Complete` describes only recorded creation evidence, never process, socket, poller, runtime or broker drain.
 `BROKER_BARRIER_UNQUALIFIED` remains a separate downstream hold.

@@ -40,7 +40,7 @@ func CreateOwnershipReceiptFromProto(r *pb.GetSandboxCreateReceiptResponse, key 
 	if state == types.CreateReceiptNoResource && (!r.AdmissionClosed || r.CompletedAt == nil || len(r.Bindings) != 0) {
 		return nil, invalid
 	}
-	if state == types.CreateReceiptSucceeded && (r.CompletedAt == nil || len(r.Bindings) != 1) {
+	if (state == types.CreateReceiptSucceeded || state == types.CreateReceiptExpired) && (r.CompletedAt == nil || len(r.Bindings) != 1) {
 		return nil, invalid
 	}
 	if state != types.CreateReceiptNotFoundAsOfRead && state != types.CreateReceiptUnsupportedCoverage && (r.ReceiptRevision == 0 || r.CreatedAt == nil) {
@@ -68,6 +68,13 @@ func CreateOwnershipReceiptFromProto(r *pb.GetSandboxCreateReceiptResponse, key 
 	for _, binding := range r.Bindings {
 		if binding == nil || !validOwnershipIdentity(binding.SandboxId) || !validOwnershipIdentity(binding.ClaimIncarnationId) || binding.InitialResourceVersion == 0 || binding.BindingRevision == 0 ||
 			binding.EffectState < 1 || binding.EffectState > 4 || seen[binding.SandboxId] || binding.CurrentResourceVersion != nil && *binding.CurrentResourceVersion == 0 {
+			return nil, invalid
+		}
+		// Sealed success (including its ownership-only expired form) cannot
+		// precede the owner's terminal effect. Complete=false is not a bypass.
+		// The producer also marks every binding terminal when completed_at is set.
+		terminalEffect := binding.EffectState == pb.CreateEffectState_CREATE_EFFECT_STATE_OWNER_TERMINAL
+		if terminalEffect != (r.CompletedAt != nil) {
 			return nil, invalid
 		}
 		seen[binding.SandboxId] = true

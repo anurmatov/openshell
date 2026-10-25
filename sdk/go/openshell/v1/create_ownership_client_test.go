@@ -260,6 +260,11 @@ func TestCreateOwnershipPreservesExpiredAndMissingWithoutAbsence(t *testing.T) {
 		t.Run(state.String(), func(t *testing.T) {
 			c, s := ownershipFixture(t)
 			s.receipt.ReceiptState = state
+			if state == pb.CreateReceiptState_CREATE_RECEIPT_STATE_EXPIRED {
+				s.receipt.CompletedAt = timestamppb.New(time.Unix(101, 0))
+				s.receipt.Bindings = []*pb.CreateOwnershipBinding{{ClaimIncarnationId: ownerClaim, SandboxId: ownerSandbox,
+					InitialResourceVersion: 1, BindingRevision: 1, EffectState: pb.CreateEffectState_CREATE_EFFECT_STATE_OWNER_TERMINAL}}
+			}
 			expected := ""
 			if state == pb.CreateReceiptState_CREATE_RECEIPT_STATE_NOT_FOUND_AS_OF_READ {
 				expected = ownerSandbox
@@ -291,4 +296,70 @@ func TestCreateOwnershipExactBindingAndIndependentCopies(t *testing.T) {
 	s.receipt.Fingerprint[0] = 0
 	_, err = c.CreateOwnership().Get(context.Background(), "workspace-a", ownerKey(), ownerClaim)
 	require.Error(t, err)
+}
+
+func TestCreateOwnershipGetRejectsContradictoryTerminalEffects(t *testing.T) {
+	for _, state := range []pb.CreateReceiptState{pb.CreateReceiptState_CREATE_RECEIPT_STATE_SUCCEEDED, pb.CreateReceiptState_CREATE_RECEIPT_STATE_EXPIRED} {
+		for _, effect := range []pb.CreateEffectState{pb.CreateEffectState_CREATE_EFFECT_STATE_NOT_STARTED, pb.CreateEffectState_CREATE_EFFECT_STATE_RESOURCE_COMMITTED, pb.CreateEffectState_CREATE_EFFECT_STATE_DRIVER_STARTED, pb.CreateEffectState_CREATE_EFFECT_STATE_OWNER_TERMINAL} {
+			t.Run(state.String()+"/"+effect.String(), func(t *testing.T) {
+				c, s := ownershipFixture(t)
+				s.receipt.ReceiptState = state
+				s.receipt.Complete = state == pb.CreateReceiptState_CREATE_RECEIPT_STATE_SUCCEEDED
+				s.receipt.CompletedAt = timestamppb.New(time.Unix(101, 0))
+				s.receipt.Bindings = []*pb.CreateOwnershipBinding{{ClaimIncarnationId: ownerClaim, SandboxId: ownerSandbox, InitialResourceVersion: 1, BindingRevision: 1, EffectState: effect}}
+				got, err := c.CreateOwnership().Get(context.Background(), "workspace-a", ownerKey(), ownerSandbox)
+				if effect == pb.CreateEffectState_CREATE_EFFECT_STATE_OWNER_TERMINAL {
+					require.NoError(t, err)
+					require.Equal(t, s.receipt.Complete, got.Complete)
+				} else {
+					require.Error(t, err)
+					require.Nil(t, got)
+					var statusError *StatusError
+					require.ErrorAs(t, err, &statusError)
+					require.Equal(t, ErrorUnavailable, statusError.Code)
+				}
+				require.Equal(t, 1, s.health)
+				require.Equal(t, 1, s.gets)
+				require.Zero(t, s.fences)
+				require.Zero(t, s.creates)
+			})
+		}
+	}
+}
+
+func TestCreateOwnershipGetRejectsTerminalMetadataContradictions(t *testing.T) {
+	for _, name := range []string{"success-incomplete-not-started", "success-missing-completion", "expired-missing-completion", "expired-missing-binding", "pending-terminal-without-completion", "ambiguous-completed-driver-started"} {
+		t.Run(name, func(t *testing.T) {
+			c, s := ownershipFixture(t)
+			s.receipt.ReceiptState = pb.CreateReceiptState_CREATE_RECEIPT_STATE_SUCCEEDED
+			s.receipt.CompletedAt = timestamppb.New(time.Unix(101, 0))
+			s.receipt.Bindings = []*pb.CreateOwnershipBinding{{ClaimIncarnationId: ownerClaim, SandboxId: ownerSandbox, InitialResourceVersion: 1, BindingRevision: 1,
+				EffectState: pb.CreateEffectState_CREATE_EFFECT_STATE_OWNER_TERMINAL}}
+			switch name {
+			case "success-incomplete-not-started":
+				s.receipt.Bindings[0].EffectState = pb.CreateEffectState_CREATE_EFFECT_STATE_NOT_STARTED
+			case "success-missing-completion":
+				s.receipt.CompletedAt = nil
+			case "expired-missing-completion":
+				s.receipt.ReceiptState = pb.CreateReceiptState_CREATE_RECEIPT_STATE_EXPIRED
+				s.receipt.CompletedAt = nil
+			case "expired-missing-binding":
+				s.receipt.ReceiptState = pb.CreateReceiptState_CREATE_RECEIPT_STATE_EXPIRED
+				s.receipt.Bindings = nil
+			case "pending-terminal-without-completion":
+				s.receipt.ReceiptState = pb.CreateReceiptState_CREATE_RECEIPT_STATE_PENDING
+				s.receipt.CompletedAt = nil
+			case "ambiguous-completed-driver-started":
+				s.receipt.ReceiptState = pb.CreateReceiptState_CREATE_RECEIPT_STATE_AMBIGUOUS
+				s.receipt.Bindings[0].EffectState = pb.CreateEffectState_CREATE_EFFECT_STATE_DRIVER_STARTED
+			}
+			got, err := c.CreateOwnership().Get(context.Background(), "workspace-a", ownerKey(), "")
+			require.Error(t, err)
+			require.Nil(t, got)
+			require.Equal(t, 1, s.health)
+			require.Equal(t, 1, s.gets)
+			require.Zero(t, s.fences)
+			require.Zero(t, s.creates)
+		})
+	}
 }
