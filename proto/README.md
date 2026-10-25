@@ -153,6 +153,13 @@ the original owner, while interceptor flag downgrade cannot bypass a known fence
 Rust workspace SDK methods check Health per operation and send each receipt/fence
 RPC once without automatic mutation retry; canonical Go, Python and TypeScript
 bindings are regenerated, not evidence of curated cross-SDK conformance.
+The additive curated Go receipt/fence client now also checks Health per call,
+preserves explicit named-workspace/original-key/immutable-ID binding, and disables
+ownership RPC replay even under an explicit transport retry policy.
+Its in-memory gRPC regressions cover downgrade, refusal, exact call counts,
+contradictory replies and independent copies; they do not qualify a live gateway.
+Go canonical fingerprint construction and Python/TypeScript curated ownership
+methods remain incomplete alongside trusted observations and retained journals.
 The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and

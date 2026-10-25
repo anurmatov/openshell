@@ -119,6 +119,25 @@ The root client also exposes subclients for providers, services, files, SSH,
 TCP forwarding, policy, configuration, templates, and workspaces. List methods
 return lazy pagers so callers choose when to fetch the next page.
 
+## Read or Fence Original Create Ownership
+
+`client.CreateOwnership().Get(ctx, workspace, key, expectedSandboxID)` reads the
+original request's receipt without selecting a same-name replacement.
+`key` contains a canonical request UUID, the original 32-byte fingerprint and
+its schema digest; this client does not yet build canonical fingerprints.
+
+`client.CreateOwnership().Fence(ctx, workspace, key)` is a separate, explicitly
+authorized metadata operation, not a timeout fallback or cancellation.
+Both methods check `sandbox-create-ownership-v1` on every call and send the
+ownership RPC once, without automatic retry after a lost response.
+The gateway remains authoritative if it downgrades after the Health check.
+The current incomplete ownership implementation withholds this capability, so
+these methods refuse rather than fall back to legacy operations.
+
+Missing, expired or incomplete receipts do not prove runtime absence.
+Even a complete Create receipt does not prove that processes, pollers or broker
+consumers have stopped; `BROKER_BARRIER_UNQUALIFIED` remains a separate hold.
+
 ## Next Steps
 
 - Review [Gateway Authentication](/how-it-works/gateways/authentication) before connecting a service to a production gateway.
