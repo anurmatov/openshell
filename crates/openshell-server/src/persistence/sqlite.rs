@@ -203,6 +203,10 @@ async fn pool_journal_settings(pool: &SqlitePool) -> PersistenceResult<(String, 
 }
 
 impl SqliteStore {
+    pub(crate) fn create_receipt_ledger(&self) -> crate::grpc::create_receipt::CreateReceiptLedger {
+        crate::grpc::create_receipt::CreateReceiptLedger::Sqlite(self.pool.clone())
+    }
+
     /// Closes the connection pool.
     #[cfg(test)]
     pub(crate) async fn close_for_test(&self) {

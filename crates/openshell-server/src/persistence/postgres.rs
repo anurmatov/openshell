@@ -276,6 +276,10 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 pub const MIN_MAX_CONNECTIONS: u32 = 2;
 
 impl PostgresStore {
+    pub(crate) fn create_receipt_ledger(&self) -> crate::grpc::create_receipt::CreateReceiptLedger {
+        crate::grpc::create_receipt::CreateReceiptLedger::Postgres(self.pool.clone())
+    }
+
     /// Connect and size the data and lock pools, falling back to
     /// [`DEFAULT_MAX_CONNECTIONS`] and `MUTATION_LOCK_POOL_MAX_CONNECTIONS`.
     pub async fn connect(

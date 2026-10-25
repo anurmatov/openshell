@@ -4,6 +4,7 @@
 //! gRPC service implementation.
 
 mod auth_rpc;
+pub(crate) mod create_receipt;
 pub mod mutation_replay;
 pub mod policy;
 pub mod provider;
