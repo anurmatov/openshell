@@ -11,6 +11,7 @@ pub mod policy;
 pub mod provider;
 mod provider_credentials;
 pub mod provider_readiness;
+pub(crate) mod runtime_ownership;
 mod sandbox;
 pub mod supervisor_host;
 use openshell_core::proto::{
@@ -337,6 +338,13 @@ impl OpenShell for OpenShellService {
             return create_request_fence::create(&self.state, request).await;
         }
         mutation_replay::run(&self.state, request).await
+    }
+
+    async fn get_sandbox_ownership_snapshot(
+        &self,
+        request: Request<openshell_core::proto::GetSandboxOwnershipSnapshotRequest>,
+    ) -> Result<Response<openshell_core::proto::GetSandboxOwnershipSnapshotResponse>, Status> {
+        runtime_ownership::get(&self.state, request).await
     }
 
     async fn get_sandbox_create_receipt(
@@ -1116,6 +1124,7 @@ pub mod test_support {
                     sandbox_id: sandbox_id.into(),
                     instance_id: "instance".into(),
                     supports_config_push: features == StreamFeatures::Apply,
+                    supports_ownership_observations: false,
                     connection_epoch,
                     supports_provider_readiness: false,
                     redirected: false,

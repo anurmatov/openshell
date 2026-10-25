@@ -1,6 +1,6 @@
 {
   "format": "create-payload-json-v1",
-  "fingerprint_schema_digest": "a8f3d557163161f5707f0471a93478e0da444ed1b86b38c0f53494637992c39d",
+  "fingerprint_schema_digest": "f3168742b484775bf479567eca73e1013c38457afbee903556fa71dedf03ef86",
   "qualification": "partial receipt wire; capabilities withheld; cross-SDK conformance pending",
   "descriptor_encoding": "transitive FileDescriptorSet in filename order, unmodified compiled FileDescriptorProto messages",
   "vectors": [

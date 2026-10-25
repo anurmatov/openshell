@@ -209,3 +209,18 @@ durable/overlap inventories and legacy false-request hashes remain unchanged.
 Trusted observations, terminal driver journals, curated SDK conformance and
 remaining source oracles are incomplete, so neither ownership capability is
 advertised; namespace provenance is not installed-runtime or broker-drain proof.
+
+
+The additive observation messages and GetSandboxOwnershipSnapshot RPC now have
+the issue #3 wire field assignments and generated clients.
+ConnectSupervisor dispatches negotiated reports into its current session only;
+replacement/disconnect drops them, repeated sequence or malformed current input
+invalidates them, and local receipt freshness expires after five seconds.
+These are transport-bound, unqualified reports, not proof of protected collector
+placement or installed policy.
+The snapshot handler checks fresh workspace authorization, original receipt
+ownership and exact binding/revisions before considering current session input.
+It does not mint cursors or return successful snapshots: protected producer and
+driver/terminal qualification remain unavailable and fail closed.
+Current supervisors keep observation negotiation false until their protected
+producer path is implemented; neither ownership capability is advertised.

@@ -332,6 +332,7 @@ struct LiveSession {
     /// Installation evidence belongs to this connection and is never restored
     /// from persistence or inherited by a replacement supervisor session.
     provider_readiness: Option<ProviderReadinessEvidence>,
+    ownership_reports: crate::grpc::runtime_ownership::SessionReports,
     #[allow(dead_code)]
     connected_at: Instant,
     /// This session's share of `openshell_server_supervisor_sessions`, released when the entry
@@ -479,6 +480,7 @@ impl SupervisorSessionRegistry {
                 endpoint_status_initialized: false,
                 endpoint_report_cursor: None,
                 provider_readiness: None,
+                ownership_reports: Default::default(),
                 connected_at: Instant::now(),
                 _gauge_slot: GaugeSlot::supervisor_session(),
             },
@@ -493,6 +495,53 @@ impl SupervisorSessionRegistry {
             }
             None => false,
         }
+    }
+
+    fn initialize_ownership_reports(
+        &self,
+        sandbox_id: &str,
+        session_id: &str,
+        main: &str,
+        epoch: u64,
+        negotiated: bool,
+    ) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions
+            .get_mut(sandbox_id)
+            .filter(|s| s.session_id == session_id)
+        {
+            session
+                .ownership_reports
+                .begin(session_id, main, epoch, negotiated);
+        }
+    }
+
+    fn record_ownership_report(
+        &self,
+        sandbox_id: &str,
+        session_id: &str,
+        report: openshell_core::proto::SupervisorOwnershipReport,
+    ) -> Result<(), Status> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(sandbox_id)
+            .filter(|s| s.session_id == session_id)
+            .ok_or_else(|| Status::aborted("OWNERSHIP_SESSION_CHANGED"))?;
+        session.ownership_reports.record(session_id, report)
+    }
+
+    pub(crate) fn require_ownership_report(
+        &self,
+        sandbox_id: &str,
+        session_id: &str,
+    ) -> Result<(), Status> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get(sandbox_id)
+            .filter(|s| s.session_id == session_id)
+            .ok_or_else(|| Status::aborted("OWNERSHIP_SESSION_CHANGED"))?;
+        session.ownership_reports.read(session_id)?;
+        Ok(())
     }
 
     /// Remove the session for a sandbox.
@@ -2166,6 +2215,7 @@ struct ConfigPushSetup {
 /// publication cannot strand the record; the lifetime guard moves into the
 /// session task or drops with early cleanup.
 struct SessionSetup {
+    supports_ownership_observations: bool,
     state: Arc<ServerState>,
     sandbox_id: String,
     instance_id: String,
@@ -2182,6 +2232,7 @@ struct SessionSetup {
 
 async fn accept_supervisor_session(setup: SessionSetup) -> Result<(), Status> {
     let SessionSetup {
+        supports_ownership_observations,
         state,
         sandbox_id,
         instance_id,
@@ -2260,6 +2311,13 @@ async fn accept_supervisor_session(setup: SessionSetup) -> Result<(), Status> {
         session_tx.clone(),
         shutdown_tx,
         mode,
+    );
+    state.supervisor_sessions.initialize_ownership_reports(
+        &sandbox_id,
+        &session_id,
+        &instance_id,
+        connection_epoch,
+        supports_ownership_observations,
     );
     if superseded {
         info!(
@@ -2561,6 +2619,7 @@ pub async fn handle_connect_supervisor(
     > = Box::pin(tokio_stream::StreamExt::map(ReceiverStream::new(rx), Ok));
 
     let setup = SessionSetup {
+        supports_ownership_observations: hello.supports_ownership_observations,
         state: Arc::clone(state),
         sandbox_id,
         instance_id: hello.instance_id,
@@ -3020,6 +3079,20 @@ async fn handle_supervisor_message(
                 reason = %close.reason,
                 "supervisor session: relay closed by supervisor"
             );
+        }
+        Some(supervisor_message::Payload::OwnershipReport(report)) => {
+            if state
+                .supervisor_sessions
+                .record_ownership_report(sandbox_id, session_id, report)
+                .is_err()
+            {
+                // No report content, process data, paths or caller strings are logged.
+                warn!(
+                    reason_code = "OWNERSHIP_REPORT_REFUSED",
+                    "supervisor ownership report refused"
+                );
+                return false;
+            }
         }
         Some(supervisor_message::Payload::ConfigUpdateResult(result)) => {
             if !session.pushes_config {
@@ -5510,5 +5583,132 @@ mod tests {
     fn ring_redirect_serves_locally_for_placeholder_endpoints() {
         assert!(ring_redirect("gw-0", "gw-1", Some(String::new())).is_none());
         assert!(ring_redirect("gw-0", "gw-1", Some("local://gw-1".to_string())).is_none());
+    }
+    #[tokio::test]
+    async fn runtime_ownership_inbound_dispatch_disconnect_and_replacement() {
+        let state = crate::grpc::test_support::test_server_state().await;
+        let id = "synthetic-owned-runtime";
+        let (tx, _rx) = mpsc::channel(4);
+        let (shutdown, _) = oneshot::channel();
+        state
+            .supervisor_sessions
+            .register(id.into(), "session".into(), tx.clone(), shutdown);
+        state
+            .supervisor_sessions
+            .initialize_ownership_reports(id, "session", "main", 1, true);
+        let session = AcceptedSession {
+            state: state.clone(),
+            sandbox_id: id.into(),
+            session_id: "session".into(),
+            instance_id: "main".into(),
+            tx: tx.clone(),
+            supports_session_redirect: false,
+            pushes_config: false,
+        };
+        let report = openshell_core::proto::SupervisorOwnershipReport {
+            sequence: 1,
+            main_instance_id: "main".into(),
+            network_instance_id: "network".into(),
+            applied_policy_hash: vec![1; 32],
+            inventory_digest: vec![2; 32],
+            observed_at: Some(prost_types::Timestamp {
+                seconds: 1,
+                nanos: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            handle_supervisor_message(
+                &session,
+                Some(supervisor_message::Payload::OwnershipReport(report.clone()))
+            )
+            .await
+        );
+        assert!(
+            state
+                .supervisor_sessions
+                .require_ownership_report(id, "session")
+                .is_ok()
+        );
+        let (shutdown, _) = oneshot::channel();
+        state
+            .supervisor_sessions
+            .register(id.into(), "new-session".into(), tx, shutdown);
+        state
+            .supervisor_sessions
+            .initialize_ownership_reports(id, "new-session", "main", 2, true);
+        assert!(
+            !handle_supervisor_message(
+                &session,
+                Some(supervisor_message::Payload::OwnershipReport(report.clone()))
+            )
+            .await
+        );
+        assert!(
+            state
+                .supervisor_sessions
+                .require_ownership_report(id, "new-session")
+                .is_err()
+        );
+        state
+            .supervisor_sessions
+            .record_ownership_report(id, "new-session", report)
+            .unwrap();
+        state.supervisor_sessions.remove_if_current(id, "session");
+        assert!(
+            state
+                .supervisor_sessions
+                .require_ownership_report(id, "new-session")
+                .is_ok()
+        );
+        state
+            .supervisor_sessions
+            .remove_if_current(id, "new-session");
+        assert!(
+            state
+                .supervisor_sessions
+                .require_ownership_report(id, "new-session")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_ownership_unnegotiated_inbound_closes_without_evidence() {
+        let state = crate::grpc::test_support::test_server_state().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let (shutdown, _) = oneshot::channel();
+        state.supervisor_sessions.register(
+            "runtime".into(),
+            "session".into(),
+            tx.clone(),
+            shutdown,
+        );
+        state
+            .supervisor_sessions
+            .initialize_ownership_reports("runtime", "session", "main", 1, false);
+        let session = AcceptedSession {
+            state: state.clone(),
+            sandbox_id: "runtime".into(),
+            session_id: "session".into(),
+            instance_id: "main".into(),
+            tx,
+            supports_session_redirect: false,
+            pushes_config: false,
+        };
+        assert!(
+            !handle_supervisor_message(
+                &session,
+                Some(supervisor_message::Payload::OwnershipReport(
+                    Default::default()
+                ))
+            )
+            .await
+        );
+        assert!(
+            state
+                .supervisor_sessions
+                .require_ownership_report("runtime", "session")
+                .is_err()
+        );
     }
 }

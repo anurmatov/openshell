@@ -11,7 +11,7 @@ use openshell_core::{ObjectId, proto::*, rpc_error};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-async fn owner<T>(
+pub(super) async fn owner<T>(
     state: &ServerState,
     request: &Request<T>,
     scope: Option<&WorkspaceSelector>,
@@ -67,7 +67,7 @@ fn validate(
     Ok(())
 }
 
-fn error(error: LedgerError) -> Status {
+pub(super) fn error(error: LedgerError) -> Status {
     match error {
         LedgerError::Mismatch => rpc_error::failed_precondition(
             "REQUEST_ID_PAYLOAD_MISMATCH",

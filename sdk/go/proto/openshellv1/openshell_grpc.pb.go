@@ -28,6 +28,7 @@ const (
 	OpenShell_GetGatewayInfo_FullMethodName                = "/openshell.v1.OpenShell/GetGatewayInfo"
 	OpenShell_CreateSandbox_FullMethodName                 = "/openshell.v1.OpenShell/CreateSandbox"
 	OpenShell_GetSandboxCreateReceipt_FullMethodName       = "/openshell.v1.OpenShell/GetSandboxCreateReceipt"
+	OpenShell_GetSandboxOwnershipSnapshot_FullMethodName   = "/openshell.v1.OpenShell/GetSandboxOwnershipSnapshot"
 	OpenShell_FenceSandboxCreate_FullMethodName            = "/openshell.v1.OpenShell/FenceSandboxCreate"
 	OpenShell_BeginRootfsTarStaging_FullMethodName         = "/openshell.v1.OpenShell/BeginRootfsTarStaging"
 	OpenShell_GetSandbox_FullMethodName                    = "/openshell.v1.OpenShell/GetSandbox"
@@ -134,6 +135,8 @@ type OpenShellClient interface {
 	CreateSandbox(ctx context.Context, in *CreateSandboxRequest, opts ...grpc.CallOption) (*SandboxResponse, error)
 	// SELECT-only lookup for the original authenticated Create owner.
 	GetSandboxCreateReceipt(ctx context.Context, in *GetSandboxCreateReceiptRequest, opts ...grpc.CallOption) (*GetSandboxCreateReceiptResponse, error)
+	// Original-owner read; unsupported producer placement never becomes absence.
+	GetSandboxOwnershipSnapshot(ctx context.Context, in *GetSandboxOwnershipSnapshotRequest, opts ...grpc.CallOption) (*GetSandboxOwnershipSnapshotResponse, error)
 	// Explicit metadata-only admission fence; never cancels an admitted owner.
 	FenceSandboxCreate(ctx context.Context, in *FenceSandboxCreateRequest, opts ...grpc.CallOption) (*FenceSandboxCreateResponse, error)
 	// Allocate a gateway-owned staging slot for a local rootfs tar archive.
@@ -409,6 +412,16 @@ func (c *openShellClient) GetSandboxCreateReceipt(ctx context.Context, in *GetSa
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSandboxCreateReceiptResponse)
 	err := c.cc.Invoke(ctx, OpenShell_GetSandboxCreateReceipt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *openShellClient) GetSandboxOwnershipSnapshot(ctx context.Context, in *GetSandboxOwnershipSnapshotRequest, opts ...grpc.CallOption) (*GetSandboxOwnershipSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxOwnershipSnapshotResponse)
+	err := c.cc.Invoke(ctx, OpenShell_GetSandboxOwnershipSnapshot_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1284,6 +1297,8 @@ type OpenShellServer interface {
 	CreateSandbox(context.Context, *CreateSandboxRequest) (*SandboxResponse, error)
 	// SELECT-only lookup for the original authenticated Create owner.
 	GetSandboxCreateReceipt(context.Context, *GetSandboxCreateReceiptRequest) (*GetSandboxCreateReceiptResponse, error)
+	// Original-owner read; unsupported producer placement never becomes absence.
+	GetSandboxOwnershipSnapshot(context.Context, *GetSandboxOwnershipSnapshotRequest) (*GetSandboxOwnershipSnapshotResponse, error)
 	// Explicit metadata-only admission fence; never cancels an admitted owner.
 	FenceSandboxCreate(context.Context, *FenceSandboxCreateRequest) (*FenceSandboxCreateResponse, error)
 	// Allocate a gateway-owned staging slot for a local rootfs tar archive.
@@ -1529,6 +1544,9 @@ func (UnimplementedOpenShellServer) CreateSandbox(context.Context, *CreateSandbo
 }
 func (UnimplementedOpenShellServer) GetSandboxCreateReceipt(context.Context, *GetSandboxCreateReceiptRequest) (*GetSandboxCreateReceiptResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandboxCreateReceipt not implemented")
+}
+func (UnimplementedOpenShellServer) GetSandboxOwnershipSnapshot(context.Context, *GetSandboxOwnershipSnapshotRequest) (*GetSandboxOwnershipSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSandboxOwnershipSnapshot not implemented")
 }
 func (UnimplementedOpenShellServer) FenceSandboxCreate(context.Context, *FenceSandboxCreateRequest) (*FenceSandboxCreateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method FenceSandboxCreate not implemented")
@@ -1880,6 +1898,24 @@ func _OpenShell_GetSandboxCreateReceipt_Handler(srv interface{}, ctx context.Con
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OpenShellServer).GetSandboxCreateReceipt(ctx, req.(*GetSandboxCreateReceiptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OpenShell_GetSandboxOwnershipSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSandboxOwnershipSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OpenShellServer).GetSandboxOwnershipSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OpenShell_GetSandboxOwnershipSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OpenShellServer).GetSandboxOwnershipSnapshot(ctx, req.(*GetSandboxOwnershipSnapshotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3288,6 +3324,10 @@ var OpenShell_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSandboxCreateReceipt",
 			Handler:    _OpenShell_GetSandboxCreateReceipt_Handler,
+		},
+		{
+			MethodName: "GetSandboxOwnershipSnapshot",
+			Handler:    _OpenShell_GetSandboxOwnershipSnapshot_Handler,
 		},
 		{
 			MethodName: "FenceSandboxCreate",
