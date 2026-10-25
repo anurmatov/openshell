@@ -1304,6 +1304,8 @@ async fn create_dispatcher_checks_original_caller_fence_before_legacy_execution(
                 fence_revision: 0,
                 admission_closed: false,
                 created_at_ms: crate::persistence::current_time_ms(),
+                effect_started: false,
+                completed_at_ms: None,
             },
             &mutation_key,
         )

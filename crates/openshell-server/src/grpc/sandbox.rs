@@ -462,6 +462,10 @@ async fn handle_create_sandbox_inner(
     request: Request<CreateSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
+    let create_ownership = request
+        .extensions()
+        .get::<super::create_receipt::Receipt>()
+        .cloned();
     let request = request.into_inner();
     let await_main_process_attachment = request.await_main_process_attachment;
     let workload_template_name = request.workload_template.trim().to_string();
@@ -714,6 +718,7 @@ async fn handle_create_sandbox_inner(
         })
         .transpose()?;
     runtime_inputs.launch_authentication = launch_authentication;
+    runtime_inputs.create_ownership = create_ownership;
 
     let sandbox = Box::pin(state.compute.create_sandbox_with_runtime_inputs_and_guards(
         sandbox,

@@ -3,8 +3,17 @@ title: "Create ownership (partial source)"
 description: "Request-bound ownership does not authorize runtime readiness or retries."
 ---
 
-`GetSandboxCreateReceipt` is SELECT-only, while `FenceSandboxCreate` is an explicit metadata operation that closes admission without cancelling an existing owner; both require fresh named-workspace authorization and bind the authenticated provider/issuer/subject to the original UUID, fingerprint and compiled schema; `ABANDONED` is complete only with closed admission, a positive fence revision and no bindings, while contradictory records return `UNAVAILABLE` without repair writes.
+This source is incomplete and advertises neither ownership capability.
 
-Rust workspace clients check `sandbox-create-ownership-v1` on the configured gateway for each call and send no receipt/fence RPC on downgrade, with no automatic fence retry, while missing or unqualified history is refused rather than reported absent and a committed binding never implies driver completion, readiness or broker drain.
+- Qualified namespace: immutable provenance for a newly initialized database, not an empty-object inference on upgrade
+- Audited Create: original caller, named workspace, canonical UUID and descriptor-projected fingerprint bound before detached execution
+- Resource commit: initial Sandbox, immutable binding and mutation target in one transaction before the driver effect marker
+- Terminal result: success with a retained binding, or NO_RESOURCE only after an ended owner without a binding or effect
+- Uncertain outcome: pending ownership retained after lost completion, caller cancellation or driver uncertainty, with no Create replay
+- Explicit fence: ABANDONED for a qualified never-admitted key, otherwise FENCED_PENDING while its owner can still finish
+- Receipt reads: fresh authorization and SELECT-only snapshots, with contradictory terminal records refused rather than repaired
+- Retention: 24-hour successful receipts and replay-cache completion, with permanent UUID fences and bindings after cache/resource deletion
+- SDK wire: canonical Go/Python/TypeScript generation and per-operation capability checks on existing Rust receipt/fence methods
 
-This source is incomplete and advertises neither ownership capability: audited Create, coverage initialization, effect completion, curated Go/Python/TypeScript client conformance (the Go receipt/fence wire bindings are regenerated, not capability-enabled), trusted observers and retained terminal journals remain pending, with PostgreSQL and installed SQL/image/runtime/restore acceptance separate and `BROKER_BARRIER_UNQUALIFIED` unchanged.
+Trusted observers, retained terminal driver journals, curated cross-SDK conformance and remaining source oracles are still pending.
+PostgreSQL, installed SQL/image/runtime/restore qualification and independent final review remain separate merge requirements, with BROKER_BARRIER_UNQUALIFIED unchanged.

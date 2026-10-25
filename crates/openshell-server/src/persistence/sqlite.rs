@@ -322,10 +322,16 @@ impl SqliteStore {
     }
 
     pub async fn migrate(&self) -> PersistenceResult<()> {
+        let previously_initialized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')")
+            .fetch_one(&self.pool).await.map_err(|e| map_db_error(&e))?;
         SQLITE_MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|e| map_migrate_error(&e))?;
+        self.create_receipt_ledger()
+            .initialize_coverage(!previously_initialized)
+            .await
+            .map_err(|_| PersistenceError::Migration("initialize create coverage".into()))?;
         self.migrate_legacy_time_payloads().await
     }
 

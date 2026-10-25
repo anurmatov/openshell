@@ -35,6 +35,8 @@ fn receipt(index: u128) -> Receipt {
         fence_revision: 0,
         admission_closed: false,
         created_at_ms: 100000,
+        effect_started: false,
+        completed_at_ms: None,
     }
 }
 async fn count(pool: &SqlitePool, table: &str) -> i64 {
@@ -915,4 +917,151 @@ async fn create_receipt_snapshot_keeps_binding_and_revision_in_one_read() {
     );
     assert!(!snapshot.receipt.admission_closed);
     assert_eq!(before, count(&pool, "objects").await);
+}
+
+#[tokio::test]
+async fn create_coverage_missing_and_upgrade_namespaces_never_self_qualify() {
+    let (ledger, pool) = ledger().await;
+    assert!(matches!(
+        ledger.coverage().await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    ledger.initialize_coverage(false).await.unwrap();
+    ledger.initialize_coverage(true).await.unwrap();
+    assert!(matches!(
+        ledger.coverage().await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    assert!(
+        sqlx::query("UPDATE sandbox_create_coverage SET fresh=true")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM sandbox_create_coverage")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn create_coverage_sqlite_upgrade_stays_unqualified_and_fresh_restart_keeps_epoch() {
+    use std::borrow::Cow;
+    let root = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite:{}?mode=rwc",
+        root.path().join("upgrade.sqlite").display()
+    );
+    let pool = SqlitePool::connect(&url).await.unwrap();
+    static ALL: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
+    let old = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(ALL.iter().filter(|m| m.version < 9).cloned().collect()),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    old.run(&pool).await.unwrap();
+    pool.close().await;
+    let store = crate::persistence::Store::connect(&url).await.unwrap();
+    assert!(matches!(
+        store.create_receipt_ledger().coverage().await,
+        Err(LedgerError::UnsupportedCoverage)
+    ));
+    let fresh_url = format!(
+        "sqlite:{}?mode=rwc",
+        root.path().join("fresh.sqlite").display()
+    );
+    let fresh = crate::persistence::Store::connect(&fresh_url)
+        .await
+        .unwrap();
+    let epoch = fresh.create_receipt_ledger().coverage().await.unwrap();
+    let restarted = crate::persistence::Store::connect(&fresh_url)
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.create_receipt_ledger().coverage().await.unwrap(),
+        epoch
+    );
+}
+
+#[tokio::test]
+async fn create_terminal_replay_cache_can_expire_without_erasing_uuid_fence() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(10);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    ledger.owner_finished(&owner, false).await.unwrap();
+    let mut row = ledger
+        .read(
+            &owner.key,
+            &owner.original_fingerprint,
+            &owner.schema_digest,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, ReceiptState::NoResource);
+    let (bytes,): (Vec<u8>,) = sqlx::query_as("SELECT payload FROM objects WHERE id=$1")
+        .bind(&owner.claim_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut claim: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        claim["completed_at_ms"],
+        serde_json::json!(row.completed_at_ms)
+    );
+    // Owned fake-time fixture: both halves of the atomic completion are old.
+    row.completed_at_ms = Some(200000);
+    claim["completed_at_ms"] = serde_json::json!(200000);
+    sqlx::query("UPDATE sandbox_create_ownership SET payload=$1 WHERE claim_id=$2")
+        .bind(serde_json::to_string(&row).unwrap())
+        .bind(&owner.claim_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE objects SET payload=$1 WHERE id=$2")
+        .bind(serde_json::to_vec(&claim).unwrap())
+        .bind(&owner.claim_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        ledger
+            .terminal_claim_completed_at(&owner.claim_id)
+            .await
+            .unwrap(),
+        Some(200000)
+    );
+    assert!(matches!(
+        ledger.guard_legacy(&owner.key).await,
+        Err(LedgerError::Fenced)
+    ));
+}
+
+#[tokio::test]
+async fn create_terminal_completion_rolls_back_when_claim_update_fails() {
+    let (ledger, pool) = ledger().await;
+    let owner = receipt(11);
+    ledger.reserve(&owner, &"1".repeat(64)).await.unwrap();
+    sqlx::raw_sql("CREATE TRIGGER refuse_terminal_claim BEFORE UPDATE ON objects WHEN NEW.object_type='mutation_admission_v1' BEGIN SELECT RAISE(ABORT,'owned failure'); END;").execute(&pool).await.unwrap();
+    assert!(ledger.owner_finished(&owner, false).await.is_err());
+    assert_eq!(
+        ledger
+            .read(
+                &owner.key,
+                &owner.original_fingerprint,
+                &owner.schema_digest
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        owner
+    );
+    assert_eq!(
+        ledger
+            .terminal_claim_completed_at(&owner.claim_id)
+            .await
+            .unwrap(),
+        None
+    );
 }

@@ -93,6 +93,7 @@ use provisioning_operation::ProvisioningOperationError;
 pub struct SandboxCreateRuntimeInputs {
     pub effective_policy: Option<ProtoSandboxPolicy>,
     pub launch_authentication: Option<Vec<u8>>,
+    pub(crate) create_ownership: Option<crate::grpc::create_receipt::Receipt>,
 }
 
 impl SandboxCreateRuntimeInputs {
@@ -101,6 +102,7 @@ impl SandboxCreateRuntimeInputs {
         Self {
             effective_policy: Some(effective_policy),
             launch_authentication: None,
+            create_ownership: None,
         }
     }
 }
@@ -1478,7 +1480,9 @@ impl ComputeRuntime {
         }
 
         // Create with MustCreate condition to prevent duplicate creation race
-        self.sandbox_index.update_from_sandbox(&sandbox);
+        if runtime_inputs.create_ownership.is_none() {
+            self.sandbox_index.update_from_sandbox(&sandbox);
+        }
         let labels_map = sandbox.object_labels();
         let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
             None
@@ -1488,33 +1492,43 @@ impl ComputeRuntime {
                     .map_err(|e| Status::internal(format!("failed to serialize labels: {e}")))?,
             )
         };
-        let result = self
-            .store
-            .put_if(
-                Sandbox::object_type(),
-                &sandbox_id,
-                sandbox.object_name(),
-                sandbox.object_workspace(),
-                &sandbox.encode_to_vec(),
-                labels_json.as_deref(),
-                WriteCondition::MustCreate,
-            )
-            .await
-            .map_err(|e| {
-                if matches!(
-                    e,
-                    crate::persistence::PersistenceError::UniqueViolation { .. }
-                ) {
-                    Status::already_exists(format!(
-                        "sandbox '{}' already exists",
-                        sandbox.object_name()
-                    ))
-                } else {
-                    Status::internal(format!("persist sandbox failed: {e}"))
-                }
-            })?;
-        if let Some(metadata) = sandbox.metadata.as_mut() {
-            metadata.resource_version = result.resource_version;
+        if let Some(owner) = runtime_inputs.create_ownership.as_ref() {
+            sandbox = self
+                .store
+                .create_receipt_ledger()
+                .bind_resource(owner, &sandbox)
+                .await
+                .map_err(|_| Status::unavailable("atomic create ownership binding failed"))?;
+            self.sandbox_index.update_from_sandbox(&sandbox);
+        } else {
+            let result = self
+                .store
+                .put_if(
+                    Sandbox::object_type(),
+                    &sandbox_id,
+                    sandbox.object_name(),
+                    sandbox.object_workspace(),
+                    &sandbox.encode_to_vec(),
+                    labels_json.as_deref(),
+                    WriteCondition::MustCreate,
+                )
+                .await
+                .map_err(|e| {
+                    if matches!(
+                        e,
+                        crate::persistence::PersistenceError::UniqueViolation { .. }
+                    ) {
+                        Status::already_exists(format!(
+                            "sandbox '{}' already exists",
+                            sandbox.object_name()
+                        ))
+                    } else {
+                        Status::internal(format!("persist sandbox failed: {e}"))
+                    }
+                })?;
+            if let Some(metadata) = sandbox.metadata.as_mut() {
+                metadata.resource_version = result.resource_version;
+            }
         }
         // The parent now owns any staged key, including if this request is
         // cancelled. Keep the creation guard until its public identity and
@@ -1568,6 +1582,13 @@ impl ComputeRuntime {
         if let Some(spec) = driver_sandbox.spec.as_mut() {
             spec.await_main_process_attachment = await_main_process_attachment;
             spec.launch_authentication = launch_authentication.unwrap_or_default();
+        }
+        if let Some(owner) = runtime_inputs.create_ownership.as_ref() {
+            self.store
+                .create_receipt_ledger()
+                .driver_started(owner)
+                .await
+                .map_err(|_| Status::unavailable("create effect admission unavailable"))?;
         }
         let result = Box::pin(self.await_provisioning_operation(
             &sandbox,
@@ -7630,6 +7651,7 @@ fn is_terminal_failure_reason(reason: &str) -> bool {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub struct NoopTestDriver {
+    sandbox_creates: std::sync::atomic::AtomicUsize,
     workspace_delete_failures: std::sync::atomic::AtomicUsize,
     sandbox_authentication: Option<Result<(String, String), (Code, String)>>,
 }
@@ -7637,8 +7659,14 @@ pub struct NoopTestDriver {
 #[cfg(any(test, feature = "test-support"))]
 impl NoopTestDriver {
     #[cfg(test)]
+    pub fn sandbox_create_count(&self) -> usize {
+        self.sandbox_creates
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(test)]
     pub fn failing_workspace_deletes(count: usize) -> Self {
         Self {
+            sandbox_creates: std::sync::atomic::AtomicUsize::new(0),
             workspace_delete_failures: std::sync::atomic::AtomicUsize::new(count),
             sandbox_authentication: None,
         }
@@ -7647,6 +7675,7 @@ impl NoopTestDriver {
     #[cfg(test)]
     pub fn authenticating_sandbox(sandbox_id: impl Into<String>) -> Self {
         Self {
+            sandbox_creates: std::sync::atomic::AtomicUsize::new(0),
             workspace_delete_failures: std::sync::atomic::AtomicUsize::new(0),
             sandbox_authentication: Some(Ok((sandbox_id.into(), "test-runtime".to_string()))),
         }
@@ -7658,6 +7687,7 @@ impl NoopTestDriver {
         runtime_identity: impl Into<String>,
     ) -> Self {
         Self {
+            sandbox_creates: std::sync::atomic::AtomicUsize::new(0),
             workspace_delete_failures: std::sync::atomic::AtomicUsize::new(0),
             sandbox_authentication: Some(Ok((sandbox_id.into(), runtime_identity.into()))),
         }
@@ -7666,6 +7696,7 @@ impl NoopTestDriver {
     #[cfg(test)]
     pub fn failing_sandbox_authentication(code: Code, message: impl Into<String>) -> Self {
         Self {
+            sandbox_creates: std::sync::atomic::AtomicUsize::new(0),
             workspace_delete_failures: std::sync::atomic::AtomicUsize::new(0),
             sandbox_authentication: Some(Err((code, message.into()))),
         }
@@ -7676,6 +7707,7 @@ impl NoopTestDriver {
 impl Default for NoopTestDriver {
     fn default() -> Self {
         Self {
+            sandbox_creates: std::sync::atomic::AtomicUsize::new(0),
             workspace_delete_failures: std::sync::atomic::AtomicUsize::new(0),
             sandbox_authentication: None,
         }
@@ -7774,6 +7806,8 @@ impl ComputeDriver for NoopTestDriver {
         _request: Request<CreateSandboxRequest>,
     ) -> Result<tonic::Response<openshell_core::proto::compute::v1::CreateSandboxResponse>, Status>
     {
+        self.sandbox_creates
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(tonic::Response::new(
             openshell_core::proto::compute::v1::CreateSandboxResponse {
                 runtime_identity: self

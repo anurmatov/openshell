@@ -136,13 +136,25 @@ transaction; PostgreSQL labels use the existing JSONB storage representation.
 The additive receipt/fence wire uses bearer scope plus fresh named-workspace and
 original-caller authorization, reads revisions/bindings in one database snapshot,
 and refuses missing/unqualified coverage rather than inventing absence.
-Explicit fencing applies only to an existing covered owner; reads never fence.
-Audited Create field 10 fails closed, including interceptor flag downgrade, until
-coverage initialization and the audited execution/effect path are complete.
+A newly initialized database records an immutable namespace epoch during migration;
+upgraded or interrupted namespaces without that provenance remain unqualified.
+Qualified missing-key reads return NOT_FOUND_AS_OF_READ with complete=false,
+never absence; an explicit authorized fence can instead retain an ABANDONED
+tombstone without driver work.
+Audited Create field 10 reserves a detached owner before execution, binds the
+actual Sandbox/initial version/mutation target atomically, and commits a driver
+effect marker before dispatch.
+Only an ended owner without a binding or effect can seal NO_RESOURCE; a lost
+completion or uncertain driver outcome retains pending ownership and bindings.
+Success and definitive pre-effect failure update receipt and replay-cache
+completion metadata atomically; cache expiry cannot erase the permanent UUID.
+Both admitted-owner completion after fencing and caller cancellation preserve
+the original owner, while interceptor flag downgrade cannot bypass a known fence.
 Rust workspace SDK methods check Health per operation and send each receipt/fence
-RPC once without automatic mutation retry; other-language generation is pending.
-The public inventory and canonical Create descriptor manifest are remeasured;
+RPC once without automatic mutation retry; canonical Go, Python and TypeScript
+bindings are regenerated, not evidence of curated cross-SDK conformance.
+The public inventory and canonical Create descriptor manifest remain measured;
 durable/overlap inventories and legacy false-request hashes remain unchanged.
-Audited Create/binding/effect integration, generated Go/Python/TypeScript SDK
-qualification, trusted observations and journals remain incomplete, so neither
-ownership capability is advertised or enabled.
+Trusted observations, terminal driver journals, curated SDK conformance and
+remaining source oracles are incomplete, so neither ownership capability is
+advertised; namespace provenance is not installed-runtime or broker-drain proof.

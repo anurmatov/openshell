@@ -334,7 +334,7 @@ impl OpenShell for OpenShellService {
             .map_err(|_| Status::internal("original Create unavailable"))?
             .is_some_and(|original| original.require_ownership_receipt);
         if request.get_ref().require_ownership_receipt || original_requires_receipt {
-            return create_request_fence::reject_unqualified_create(&self.state, request).await;
+            return create_request_fence::create(&self.state, request).await;
         }
         mutation_replay::run(&self.state, request).await
     }

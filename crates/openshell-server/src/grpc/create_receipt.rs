@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable admission/fence metadata foundation. No public handler or capability is enabled.
+//! Durable request ownership and effect transitions. Capabilities remain unadvertised.
 //! Missing records are only a point-in-time read, never proof of absence or retry permission.
 
 use openshell_core::proto::Sandbox;
@@ -53,6 +53,8 @@ pub(crate) enum ReceiptState {
     Pending,
     FencedPending,
     Abandoned,
+    Succeeded,
+    NoResource,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +70,10 @@ pub(crate) struct Receipt {
     pub fence_revision: i64,
     pub admission_closed: bool,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub effect_started: bool,
+    #[serde(default)]
+    pub completed_at_ms: Option<i64>,
 }
 
 impl Receipt {
@@ -81,6 +87,9 @@ impl Receipt {
             || self.revision < 1
             || self.fence_revision < 0
             || self.created_at_ms < 0
+            || self
+                .completed_at_ms
+                .is_some_and(|time| time < self.created_at_ms)
         {
             return Err(LedgerError::Invalid);
         }
@@ -91,6 +100,8 @@ impl Receipt {
             ReceiptState::Pending => "PENDING",
             ReceiptState::FencedPending => "FENCED_PENDING",
             ReceiptState::Abandoned => "ABANDONED",
+            ReceiptState::Succeeded => "SUCCEEDED",
+            ReceiptState::NoResource => "NO_RESOURCE",
         }
     }
 }
@@ -138,6 +149,192 @@ pub(crate) enum CreateReceiptLedger {
 }
 
 impl CreateReceiptLedger {
+    /// Once-only startup provenance. An upgrade, restore without provenance or
+    /// an uncertain concurrent initializer is never promoted by empty objects.
+    pub(crate) async fn initialize_coverage(&self, fresh: bool) -> Result<()> {
+        let epoch = uuid::Uuid::new_v4().to_string();
+        let now = crate::persistence::current_time_ms();
+        let sql = "INSERT INTO sandbox_create_coverage(singleton,epoch,fresh,created_at_ms) VALUES(1,$1,$2,$3) ON CONFLICT(singleton) DO NOTHING";
+        match self {
+            Self::Sqlite(pool) => sqlx::query(sql)
+                .bind(&epoch)
+                .bind(fresh)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+            Self::Postgres(pool) => sqlx::query(sql)
+                .bind(&epoch)
+                .bind(fresh)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+        }
+        .map_err(|_| LedgerError::Unavailable)?;
+        Ok(())
+    }
+
+    /// A replay-cache row can expire only after its permanent owner is terminal.
+    pub(crate) async fn terminal_claim_completed_at(&self, claim_id: &str) -> Result<Option<i64>> {
+        let sql = "SELECT payload FROM sandbox_create_ownership WHERE claim_id=$1";
+        let payload: Option<String> = match self {
+            Self::Sqlite(pool) => {
+                sqlx::query_scalar(sql)
+                    .bind(claim_id)
+                    .fetch_optional(pool)
+                    .await
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar(sql)
+                    .bind(claim_id)
+                    .fetch_optional(pool)
+                    .await
+            }
+        }
+        .map_err(|_| LedgerError::Unavailable)?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let row: Receipt = serde_json::from_str(&payload).map_err(|_| LedgerError::Corrupt)?;
+        row.validate().map_err(|_| LedgerError::Corrupt)?;
+        if row.claim_id != claim_id {
+            return Err(LedgerError::Corrupt);
+        }
+        if !matches!(
+            row.state,
+            ReceiptState::Succeeded | ReceiptState::NoResource
+        ) {
+            return Ok(None);
+        }
+        let snapshot = self
+            .read_snapshot(&row.key, &row.original_fingerprint, &row.schema_digest)
+            .await?
+            .ok_or(LedgerError::Corrupt)?;
+        let current = snapshot.receipt;
+        if current.claim_id != claim_id
+            || !matches!(
+                current.state,
+                ReceiptState::Succeeded | ReceiptState::NoResource
+            )
+            || current.completed_at_ms.is_none()
+            || (current.state == ReceiptState::Succeeded
+                && (!current.effect_started || snapshot.bindings.len() != 1))
+            || (current.state == ReceiptState::NoResource
+                && (current.effect_started
+                    || !current.admission_closed
+                    || !snapshot.bindings.is_empty()))
+        {
+            return Err(LedgerError::Corrupt);
+        }
+        Ok(current.completed_at_ms)
+    }
+
+    /// SELECT only. No timestamp, object count or missing row creates coverage.
+    pub(crate) async fn coverage(&self) -> Result<String> {
+        let sql = "SELECT epoch,fresh FROM sandbox_create_coverage WHERE singleton=1";
+        let row: Option<(String, bool)> = match self {
+            Self::Sqlite(pool) => sqlx::query_as(sql).fetch_optional(pool).await,
+            Self::Postgres(pool) => sqlx::query_as(sql).fetch_optional(pool).await,
+        }
+        .map_err(|_| LedgerError::Unavailable)?;
+        match row {
+            Some((epoch, true)) if uuid(&epoch) => Ok(epoch),
+            _ => Err(LedgerError::UnsupportedCoverage),
+        }
+    }
+
+    /// CAS preserves concurrent fences. A failed proof never reaches the driver.
+    pub(crate) async fn driver_started(&self, owner: &Receipt) -> Result<()> {
+        self.transition(owner, None).await
+    }
+
+    /// Only the admitted owner calls this after the real handler returned.
+    /// Errors with any binding/effect remain unresolved, not false absence.
+    pub(crate) async fn owner_finished(&self, owner: &Receipt, success: bool) -> Result<()> {
+        self.transition(owner, Some(success)).await
+    }
+
+    async fn transition(&self, owner: &Receipt, finished: Option<bool>) -> Result<()> {
+        for _ in 0..8 {
+            let snapshot = self
+                .read_snapshot(
+                    &owner.key,
+                    &owner.original_fingerprint,
+                    &owner.schema_digest,
+                )
+                .await?
+                .ok_or(LedgerError::Corrupt)?;
+            let mut row = binding_owner(
+                &serde_json::to_string(&snapshot.receipt).map_err(|_| LedgerError::Corrupt)?,
+                owner,
+            )?;
+            let previous = row.revision;
+            match finished {
+                None => {
+                    if row.effect_started || snapshot.bindings.len() != 1 {
+                        return Err(LedgerError::Corrupt);
+                    }
+                    row.effect_started = true;
+                }
+                Some(true) => {
+                    if !row.effect_started || snapshot.bindings.len() != 1 {
+                        return Err(LedgerError::Corrupt);
+                    }
+                    row.state = ReceiptState::Succeeded;
+                    row.completed_at_ms = Some(crate::persistence::current_time_ms());
+                }
+                Some(false) if !row.effect_started && snapshot.bindings.is_empty() => {
+                    row.state = ReceiptState::NoResource;
+                    row.admission_closed = true;
+                    row.completed_at_ms = Some(crate::persistence::current_time_ms());
+                }
+                Some(false) => return Ok(()),
+            }
+            row.revision = previous.checked_add(1).ok_or(LedgerError::Corrupt)?;
+            let payload = serde_json::to_string(&row).map_err(|_| LedgerError::Corrupt)?;
+            let sql = "UPDATE sandbox_create_ownership SET state=$1,receipt_revision=$2,admission_closed=$3,payload=$4 WHERE claim_id=$5 AND receipt_revision=$6";
+            let updated = if finished.is_some() {
+                match self {
+                    Self::Sqlite(pool) => {
+                        finish_sqlite(pool, &row, previous, &snapshot.bindings).await?
+                    }
+                    Self::Postgres(pool) => {
+                        finish_postgres(pool, &row, previous, &snapshot.bindings).await?
+                    }
+                }
+            } else {
+                match self {
+                    Self::Sqlite(pool) => sqlx::query(sql)
+                        .bind(row.sql_state())
+                        .bind(row.revision)
+                        .bind(row.admission_closed)
+                        .bind(&payload)
+                        .bind(&row.claim_id)
+                        .bind(previous)
+                        .execute(pool)
+                        .await
+                        .map(|r| r.rows_affected()),
+                    Self::Postgres(pool) => sqlx::query(sql)
+                        .bind(row.sql_state())
+                        .bind(row.revision)
+                        .bind(row.admission_closed)
+                        .bind(&payload)
+                        .bind(&row.claim_id)
+                        .bind(previous)
+                        .execute(pool)
+                        .await
+                        .map(|r| r.rows_affected()),
+                }
+                .map_err(|_| LedgerError::Unavailable)?
+            };
+            if updated == 1 {
+                return Ok(());
+            }
+        }
+        Err(LedgerError::Unavailable)
+    }
+
     /// SELECT only, including missing/mismatched/expired keys. No pruning or mutation dependency.
     pub(crate) async fn read(
         &self,
@@ -439,7 +636,9 @@ async fn fence_sqlite_transaction(
             return Ok(previous);
         }
         previous.admission_closed = true;
-        previous.state = ReceiptState::FencedPending;
+        if previous.state == ReceiptState::Pending {
+            previous.state = ReceiptState::FencedPending;
+        }
         previous.revision += 1;
         previous.fence_revision = 1;
         receipt = previous;
@@ -568,7 +767,9 @@ async fn fence_postgres(
             return Ok(previous);
         }
         previous.admission_closed = true;
-        previous.state = ReceiptState::FencedPending;
+        if previous.state == ReceiptState::Pending {
+            previous.state = ReceiptState::FencedPending;
+        }
         previous.revision += 1;
         previous.fence_revision = 1;
         receipt = previous;
@@ -979,4 +1180,87 @@ async fn snapshot_postgres(
     }
     tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
     Ok(Some(ReceiptSnapshot { receipt, bindings }))
+}
+
+fn completed_claim(
+    bytes: &[u8],
+    row: &Receipt,
+    bindings: &[(String, i64, i64)],
+) -> Result<Vec<u8>> {
+    let mut claim: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| LedgerError::Corrupt)?;
+    let target = bindings
+        .first()
+        .map(|(id, _, _)| serde_json::Value::String(id.clone()))
+        .unwrap_or(serde_json::Value::Null);
+    if claim["format_version"] != 2
+        || claim["payload_hash"] != row.original_fingerprint
+        || claim["workspace_id"] != row.key.workspace_id
+        || claim["target_id"] != target
+        || !claim["completed_at_ms"].is_null()
+        || !claim["success"].is_null()
+    {
+        return Err(LedgerError::Corrupt);
+    }
+    claim["completed_at_ms"] = serde_json::json!(row.completed_at_ms.ok_or(LedgerError::Corrupt)?);
+    // Not a replayable success. Version 2 remains fenced by the permanent ledger.
+    serde_json::to_vec(&claim).map_err(|_| LedgerError::Corrupt)
+}
+
+async fn finish_sqlite(
+    pool: &SqlitePool,
+    row: &Receipt,
+    previous: i64,
+    bindings: &[(String, i64, i64)],
+) -> Result<u64> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| LedgerError::Unavailable)?;
+    let (bytes,version):(Vec<u8>,i64)=sqlx::query_as("SELECT payload,resource_version FROM objects WHERE object_type='mutation_admission_v1' AND id=$1 AND workspace=$2")
+        .bind(&row.claim_id).bind(format!("_mutation/{}",row.key.caller_hash)).fetch_optional(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.ok_or(LedgerError::Corrupt)?;
+    let claim = completed_claim(&bytes, row, bindings)?;
+    let updated=sqlx::query("UPDATE sandbox_create_ownership SET state=$1,receipt_revision=$2,admission_closed=$3,payload=$4 WHERE claim_id=$5 AND receipt_revision=$6")
+        .bind(row.sql_state()).bind(row.revision).bind(row.admission_closed).bind(serde_json::to_string(row).map_err(|_|LedgerError::Corrupt)?).bind(&row.claim_id).bind(previous).execute(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.rows_affected();
+    if updated == 0 {
+        return Ok(0);
+    }
+    let claim_updated=sqlx::query("UPDATE objects SET payload=$1,resource_version=resource_version+1 WHERE id=$2 AND object_type='mutation_admission_v1' AND resource_version=$3")
+        .bind(claim).bind(&row.claim_id).bind(version).execute(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.rows_affected();
+    if claim_updated != 1 {
+        return Err(LedgerError::Corrupt);
+    }
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(1)
+}
+
+async fn finish_postgres(
+    pool: &PgPool,
+    row: &Receipt,
+    previous: i64,
+    bindings: &[(String, i64, i64)],
+) -> Result<u64> {
+    let mut tx = pool.begin().await.map_err(|_| LedgerError::Unavailable)?;
+    let _: String = sqlx::query_scalar(
+        "SELECT caller_hash FROM sandbox_create_ownership_callers WHERE caller_hash=$1 FOR UPDATE",
+    )
+    .bind(&row.key.caller_hash)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| LedgerError::Unavailable)?;
+    let (bytes,version):(Vec<u8>,i64)=sqlx::query_as("SELECT payload,resource_version FROM objects WHERE object_type='mutation_admission_v1' AND id=$1 AND workspace=$2 FOR UPDATE")
+        .bind(&row.claim_id).bind(format!("_mutation/{}",row.key.caller_hash)).fetch_optional(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.ok_or(LedgerError::Corrupt)?;
+    let claim = completed_claim(&bytes, row, bindings)?;
+    let updated=sqlx::query("UPDATE sandbox_create_ownership SET state=$1,receipt_revision=$2,admission_closed=$3,payload=$4 WHERE claim_id=$5 AND receipt_revision=$6")
+        .bind(row.sql_state()).bind(row.revision).bind(row.admission_closed).bind(serde_json::to_string(row).map_err(|_|LedgerError::Corrupt)?).bind(&row.claim_id).bind(previous).execute(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.rows_affected();
+    if updated == 0 {
+        return Ok(0);
+    }
+    let claim_updated=sqlx::query("UPDATE objects SET payload=$1,resource_version=resource_version+1 WHERE id=$2 AND object_type='mutation_admission_v1' AND resource_version=$3")
+        .bind(claim).bind(&row.claim_id).bind(version).execute(&mut *tx).await.map_err(|_|LedgerError::Unavailable)?.rows_affected();
+    if claim_updated != 1 {
+        return Err(LedgerError::Corrupt);
+    }
+    tx.commit().await.map_err(|_| LedgerError::Unavailable)?;
+    Ok(1)
 }

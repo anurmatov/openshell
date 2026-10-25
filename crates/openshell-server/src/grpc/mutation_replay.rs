@@ -174,6 +174,20 @@ pub(super) async fn run<M: Mutation>(
     {
         return Err(replay_unavailable());
     }
+    // A retained audited UUID is not a legacy replay candidate, including after
+    // the replay cache was pruned. Repeat this inside atomic admission too.
+    if M::METHOD == "CreateSandbox" {
+        state
+            .store
+            .create_receipt_ledger()
+            .guard_legacy(&super::create_receipt::ReceiptKey {
+                caller_hash: caller.clone(),
+                workspace_id: scope.workspace_id.clone().ok_or_else(uncertain)?,
+                request_uuid: request_id.clone(),
+            })
+            .await
+            .map_err(create_guard_error)?;
+    }
     let (payload_hash, protection) = if M::PROTECTED {
         let key = fingerprint_key(state).await?;
         (
@@ -449,7 +463,15 @@ impl Completion {
     }
 }
 
-async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
+pub(super) async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
+    prune_expired_at(store, bucket, current_time_ms()).await
+}
+
+pub(super) async fn prune_expired_at(
+    store: &Store,
+    bucket: &str,
+    now_ms: i64,
+) -> Result<bool, Status> {
     // The bucket is atomically bounded, so this scan cannot grow without limit.
     let rows = store
         .list(OBJECT_TYPE, bucket, MAX_ADMISSIONS_PER_CALLER, 0)
@@ -460,11 +482,22 @@ async fn prune_expired(store: &Store, bucket: &str) -> Result<bool, Status> {
         let Ok(admission) = serde_json::from_slice::<Admission>(&row.payload) else {
             continue;
         };
-        if admission.format_version == 1
-            && admission.success.is_some()
-            && admission.completed_at_ms.is_some_and(|completed| {
-                current_time_ms() >= completed.saturating_add(SUCCESS_TTL_MS)
-            })
+        let finalized = if admission.format_version == 1 {
+            admission.success.is_some()
+        } else if admission.format_version == 2 && admission.completed_at_ms.is_some() {
+            store
+                .create_receipt_ledger()
+                .terminal_claim_completed_at(&row.id)
+                .await
+                .map_err(create_guard_error)?
+                == admission.completed_at_ms
+        } else {
+            false
+        };
+        if finalized
+            && admission
+                .completed_at_ms
+                .is_some_and(|completed| now_ms >= completed.saturating_add(SUCCESS_TTL_MS))
         {
             match store
                 .delete_if(OBJECT_TYPE, &row.id, row.resource_version)

@@ -65,3 +65,8 @@ CREATE TRIGGER create_legacy_key_no_delete BEFORE DELETE ON sandbox_create_legac
 FOR EACH ROW EXECUTE FUNCTION refuse_create_ownership_delete();
 CREATE TRIGGER create_legacy_key_no_update BEFORE UPDATE ON sandbox_create_legacy_keys
 FOR EACH ROW EXECUTE FUNCTION refuse_create_ownership_delete();
+
+-- A namespace is qualified only when this application observes a new database.
+CREATE TABLE sandbox_create_coverage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch TEXT NOT NULL, fresh BOOLEAN NOT NULL, created_at_ms BIGINT NOT NULL);
+CREATE TRIGGER create_coverage_no_update BEFORE UPDATE ON sandbox_create_coverage FOR EACH ROW EXECUTE FUNCTION refuse_create_ownership_delete();
+CREATE TRIGGER create_coverage_no_delete BEFORE DELETE ON sandbox_create_coverage FOR EACH ROW EXECUTE FUNCTION refuse_create_ownership_delete();
