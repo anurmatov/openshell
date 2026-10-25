@@ -3,6 +3,8 @@
 
 // Public API surface for @nvidia/openshell-sdk.
 //
+export type { CreateOwnershipKey } from './create-fingerprint.js';
+export { createOwnershipKeyFromRequest } from './create-fingerprint.js';
 export type {
   ConnectOptions,
   DeleteOptions,

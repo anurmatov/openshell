@@ -189,6 +189,14 @@ mod tests {
     }
 
     #[test]
+    fn typescript_canonical_descriptor_is_the_exact_compiled_projection() {
+        assert_eq!(
+            schema_descriptor_set().unwrap(),
+            include_bytes!("../../../sdk/typescript/src/create_descriptor.bin")
+        );
+    }
+
+    #[test]
     fn published_vectors_match_actual_projection_and_hashes() {
         let manifest: Value =
             serde_json::from_str(include_str!("../../../proto/create_fingerprint.v1.json"))
