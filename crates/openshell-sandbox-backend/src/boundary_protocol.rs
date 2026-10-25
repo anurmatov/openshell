@@ -773,6 +773,8 @@ impl fmt::Debug for RequestEnvelope {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Request {
+    /// Bounded read of native workload facts on the current authenticated session.
+    ObserveOwnership,
     /// Read image policy without attaching or launching a workload.
     DiscoverPolicy,
     Attach {
@@ -855,6 +857,7 @@ impl Request {
 impl fmt::Debug for Request {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ObserveOwnership => formatter.write_str("ObserveOwnership"),
             Self::DiscoverPolicy => formatter.write_str("DiscoverPolicy"),
             Self::Attach {
                 supervisor_instance_id: _,
@@ -949,6 +952,9 @@ pub struct ResponseEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
+    OwnershipInventory {
+        inventory: Box<OwnershipInventoryWire>,
+    },
     ImagePolicy {
         yaml: Option<String>,
         invalid: bool,
@@ -1001,6 +1007,35 @@ pub enum Response {
         kind: BoundaryErrorKind,
         message: String,
     },
+}
+
+/// Local facts, not a qualified report, terminal absence or broker barrier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipInventoryWire {
+    pub generation: String,
+    pub process_id: String,
+    pub installed_policy: Box<SandboxPolicyWire>,
+    pub processes: Vec<OwnershipProcessWire>,
+    pub sockets: Vec<OwnershipSocketWire>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipProcessWire {
+    pub kernel_boot_id: String,
+    pub pid: u32,
+    pub starttime_ticks: u64,
+    pub pid_namespace_inode: u64,
+    pub net_namespace_inode: u64,
+    pub executable_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipSocketWire {
+    pub inode: u64,
+    pub protocol: String,
+    pub local: std::net::SocketAddr,
+    pub remote: std::net::SocketAddr,
+    pub owners: Vec<OwnershipProcessWire>,
 }
 
 /// Sandbox-monotonic timing carried across the boundary protocol.

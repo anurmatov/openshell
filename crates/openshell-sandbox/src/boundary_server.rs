@@ -1527,6 +1527,17 @@ mod linux {
                 .map_err(|error| format!("write control frame: {error}"));
         }
         match request.request.clone() {
+            Request::ObserveOwnership => {
+                let response = runtime.observe_ownership(principal);
+                return write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        request_id: request.request_id,
+                        response,
+                    },
+                )
+                .map_err(|_| "write ownership inventory response".to_string());
+            }
             Request::TerminateBoundary => {
                 let response = runtime
                     .process_runtime
@@ -2188,6 +2199,62 @@ mod linux {
             }
         }
 
+        /// Only the authenticated current supervisor can read its own workload.
+        /// No request body can supply native identity or qualify broker absence.
+        fn observe_ownership(&self, principal: &SandboxProtocolPrincipal) -> Response {
+            let read = || -> Result<Response, String> {
+                self.authorize_request(principal, &Request::ObserveOwnership)?;
+                let process = match &*lock(&self.state) {
+                    RuntimeState::Running(process) => process.clone(),
+                    _ => return Err("ownership workload is not running".into()),
+                };
+                if process.has_exited() {
+                    return Err("ownership workload exited".into());
+                }
+                let anchor = process
+                    .ownership_anchor
+                    .as_ref()
+                    .map_err(|_| "ownership launch anchor unavailable".to_string())?;
+                if process.entrypoint_pid.load(Ordering::Acquire) != anchor.pid {
+                    return Err("ownership launch anchor changed".into());
+                }
+                let policy = lock(&self.attached_policy)
+                    .clone()
+                    .ok_or_else(|| "ownership installed policy unavailable".to_string())?;
+                let facts = crate::native_api::ownership_inventory::observe(anchor)
+                    .map_err(|_| "ownership native source unavailable".to_string())?;
+                self.authorize_request(principal, &Request::ObserveOwnership)?;
+                let policy_matches = lock(&self.attached_policy).as_ref() == Some(&policy);
+                let same_process = matches!(&*lock(&self.state), RuntimeState::Running(current) if Arc::ptr_eq(current, &process));
+                if process.has_exited()
+                    || process.entrypoint_pid.load(Ordering::Acquire) != anchor.pid
+                    || !policy_matches
+                    || !same_process
+                {
+                    return Err("ownership workload or policy replaced".into());
+                }
+                let response = Response::OwnershipInventory {
+                    inventory: Box::new(
+                        openshell_sandbox_backend::boundary_protocol::OwnershipInventoryWire {
+                            generation: self.config.generation.clone(),
+                            process_id: process.process_id(),
+                            installed_policy: Box::new(policy),
+                            processes: facts.processes,
+                            sockets: facts.sockets,
+                        },
+                    ),
+                };
+                // Preserve the existing lower transport ceiling; never truncate.
+                encode_frame(&ResponseEnvelope {
+                    request_id: uuid::Uuid::nil().to_string(),
+                    response: response.clone(),
+                })
+                .map_err(|_| "ownership inventory transport limit".to_string())?;
+                Ok(response)
+            };
+            read().unwrap_or_else(|message| guest_error(BoundaryErrorKind::Unavailable, message))
+        }
+
         fn commit_attach(
             &self,
             principal: &SandboxProtocolPrincipal,
@@ -2499,6 +2566,11 @@ mod linux {
             let request_id = envelope.request_id;
             let payload_digest = envelope.payload_digest;
             let response = match envelope.request {
+                // Inventory must retain the authenticated principal through the read.
+                Request::ObserveOwnership => guest_error(
+                    BoundaryErrorKind::Denied,
+                    "ownership inventory requires authenticated dispatch",
+                ),
                 Request::DiscoverPolicy => Self::discover_image_policy(),
                 Request::Attach { policy, .. } => self.attach(*policy),
                 Request::Confirm => self.confirm(),
@@ -3418,6 +3490,11 @@ mod linux {
     type SharedProcessExit = Arc<(Mutex<Option<ProcessExit>>, Condvar)>;
 
     struct ManagedProcess {
+        ownership_anchor: Result<
+            openshell_sandbox_backend::boundary_protocol::OwnershipProcessWire,
+            crate::native_api::ownership_inventory::ObservationError,
+        >,
+        entrypoint_pid: Arc<AtomicU32>,
         process_id: String,
         signaler: AgentSignaler,
         exit: SharedProcessExit,
@@ -3488,7 +3565,7 @@ mod linux {
                     spec.timeout_secs,
                     spec.interactive,
                     &policy,
-                    entrypoint_pid,
+                    entrypoint_pid.clone(),
                     provider_credentials.clone(),
                     provider_env,
                     ca_file_paths,
@@ -3496,6 +3573,9 @@ mod linux {
                 ))
                 .map_err(|error| format!("start process supervisor leaf: {error:?}"))?;
             let signaler = spawned.signaler();
+            let ownership_anchor = crate::native_api::ownership_inventory::bind(
+                entrypoint_pid.load(Ordering::Acquire),
+            );
             let boundary_exec = spawned.boundary_exec();
             let loopback_connector = spawned.loopback_connector();
             let main_session = spawned.main_session();
@@ -3512,6 +3592,8 @@ mod linux {
                 changed.notify_all();
             });
             Ok(Self {
+                ownership_anchor,
+                entrypoint_pid,
                 process_id,
                 signaler,
                 exit,
@@ -4729,6 +4811,92 @@ mod linux {
 
         fn availability_test_runtime() -> (Arc<BoundaryRuntime>, String) {
             availability_test_runtime_with(None)
+        }
+
+        #[tokio::test]
+        async fn ownership_inventory_authentication_and_replacement_have_zero_lifecycle_effects() {
+            let (runtime, token) = availability_test_runtime();
+            assert!(
+                runtime
+                    .authenticate_request(
+                        SandboxConnectionId::new(),
+                        bearer_request((), "invalid").metadata()
+                    )
+                    .is_err()
+            );
+            let first = runtime
+                .authenticate_request(
+                    SandboxConnectionId::new(),
+                    bearer_request((), &token).metadata(),
+                )
+                .unwrap();
+            assert!(
+                runtime
+                    .authorize_request(&first, &Request::ObserveOwnership)
+                    .is_err()
+            );
+            runtime
+                .connections
+                .attach(&first, test_supervisor_instance_id())
+                .unwrap();
+            assert!(
+                runtime
+                    .authorize_request(&first, &Request::ObserveOwnership)
+                    .is_err()
+            );
+            runtime.connections.confirm(&first).unwrap();
+            assert!(
+                runtime
+                    .authorize_request(&first, &Request::ObserveOwnership)
+                    .is_ok()
+            );
+            assert!(matches!(
+                runtime.observe_ownership(&first),
+                Response::Error {
+                    kind: BoundaryErrorKind::Unavailable,
+                    ..
+                }
+            ));
+            let second = runtime
+                .authenticate_request(
+                    SandboxConnectionId::new(),
+                    bearer_request((), &token).metadata(),
+                )
+                .unwrap();
+            runtime
+                .connections
+                .attach(&second, test_supervisor_instance_id())
+                .unwrap();
+            runtime.connections.confirm(&second).unwrap();
+            assert!(
+                runtime
+                    .authorize_request(&first, &Request::ObserveOwnership)
+                    .is_err()
+            );
+            assert!(matches!(
+                runtime.observe_ownership(&first),
+                Response::Error { .. }
+            ));
+            assert!(matches!(
+                *lock(&runtime.state),
+                RuntimeState::AwaitingAttach
+            ));
+            assert!(lock(&runtime.started_agent).is_none());
+            assert!(lock(&runtime.replay_ledger).entries.is_empty());
+        }
+
+        #[tokio::test]
+        async fn ownership_inventory_dispatch_without_principal_refuses() {
+            let (runtime, _) = availability_test_runtime();
+            assert!(matches!(
+                runtime.dispatch(RequestEnvelope::new(Request::ObserveOwnership).unwrap()),
+                Response::Error {
+                    kind: BoundaryErrorKind::Denied,
+                    ..
+                }
+            ));
+            assert!(lock(&runtime.replay_ledger).entries.is_empty());
+            assert!(lock(&runtime.started_agent).is_none());
         }
 
         fn availability_test_runtime_with_flush(

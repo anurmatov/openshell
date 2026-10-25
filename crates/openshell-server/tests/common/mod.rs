@@ -53,6 +53,13 @@ pub struct TestOpenShell;
 
 #[tonic::async_trait]
 impl OpenShell for TestOpenShell {
+    async fn get_sandbox_ownership_snapshot(
+        &self,
+        _request: tonic::Request<openshell_core::proto::GetSandboxOwnershipSnapshotRequest>,
+    ) -> Result<Response<openshell_core::proto::GetSandboxOwnershipSnapshotResponse>, Status> {
+        Err(Status::unimplemented("ownership fixture not configured"))
+    }
+
     async fn get_sandbox_create_receipt(
         &self,
         _request: tonic::Request<openshell_core::proto::GetSandboxCreateReceiptRequest>,

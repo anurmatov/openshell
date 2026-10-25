@@ -43,6 +43,137 @@ fn number<T: TryFrom<u64>>(value: u64) -> Result<T, FrameError> {
         .map_err(|_| invalid("integer out of range"))
 }
 
+#[cfg(test)]
+mod ownership_inventory_tests {
+    use super::*;
+
+    fn process() -> p::OwnershipProcess {
+        p::OwnershipProcess {
+            kernel_boot_id: "11111111-1111-4111-8111-111111111111".into(),
+            pid: 17,
+            starttime_ticks: 100,
+            pid_namespace_inode: 12,
+            net_namespace_inode: 13,
+            executable_digest: vec![7; 32],
+        }
+    }
+
+    #[test]
+    fn ownership_inventory_process_round_trip_preserves_incarnation() {
+        let value = process();
+        assert_eq!(
+            w::OwnershipProcessWire::from_proto(value.clone())
+                .unwrap()
+                .to_proto()
+                .unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn ownership_inventory_forged_process_fields_refuse() {
+        let valid = process();
+        for field in 0..6 {
+            let mut invalid = valid.clone();
+            match field {
+                0 => invalid.pid = 0,
+                1 => invalid.starttime_ticks = 0,
+                2 => invalid.pid_namespace_inode = 0,
+                3 => invalid.net_namespace_inode = 0,
+                4 => invalid.executable_digest.clear(),
+                _ => invalid.kernel_boot_id = "not-a-boot-id".into(),
+            }
+            assert!(w::OwnershipProcessWire::from_proto(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn ownership_inventory_absent_policy_and_empty_body_refuse() {
+        assert!(w::OwnershipInventoryWire::from_proto(p::OwnershipInventory::default()).is_err());
+        let body = p::OwnershipInventory {
+            generation: "generation-1".into(),
+            process_id: "main:0".into(),
+            processes: vec![process()],
+            ..Default::default()
+        };
+        assert!(w::OwnershipInventoryWire::from_proto(body).is_err());
+    }
+
+    #[test]
+    fn ownership_inventory_ownerless_or_unknown_socket_refuses() {
+        for protocol in ["tcp", "unknown"] {
+            assert!(
+                w::OwnershipSocketWire::from_proto(p::OwnershipSocket {
+                    inode: 1,
+                    protocol: protocol.into(),
+                    local: "127.0.0.1:1".into(),
+                    remote: "127.0.0.2:2".into(),
+                    owners: vec![],
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_inventory_response_round_trip_and_foreign_owner_refusal() {
+        let process = w::OwnershipProcessWire::from_proto(process()).unwrap();
+        let mut inventory = w::OwnershipInventoryWire {
+            generation: "generation-1".into(),
+            process_id: "main:0".into(),
+            installed_policy: Box::new(w::SandboxPolicyWire {
+                version: 1,
+                read_only: vec![],
+                read_write: vec![],
+                include_workdir: false,
+                network: w::NetworkModeWire::Block,
+                proxy_addr: None,
+                landlock: w::LandlockCompatibilityWire::HardRequirement,
+                run_as_user: None,
+                run_as_group: None,
+            }),
+            processes: vec![process.clone()],
+            sockets: vec![w::OwnershipSocketWire {
+                inode: 123,
+                protocol: "tcp".into(),
+                local: "127.0.0.1:1".parse().unwrap(),
+                remote: "127.0.0.2:2".parse().unwrap(),
+                owners: vec![process],
+            }],
+        };
+        let response = w::ResponseEnvelope {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            response: w::Response::OwnershipInventory {
+                inventory: Box::new(inventory.clone()),
+            },
+        };
+        assert_eq!(
+            w::ResponseEnvelope::from_proto(response.to_proto().unwrap()).unwrap(),
+            response
+        );
+        inventory.sockets[0].owners[0].starttime_ticks += 1;
+        assert!(w::OwnershipInventoryWire::from_proto(inventory.to_proto().unwrap()).is_err());
+        inventory.sockets.clear();
+        inventory.processes.push(inventory.processes[0].clone());
+        assert!(w::OwnershipInventoryWire::from_proto(inventory.to_proto().unwrap()).is_err());
+    }
+
+    #[test]
+    fn ownership_inventory_request_is_typed_and_read_only() {
+        let request = w::RequestEnvelope::new(w::Request::ObserveOwnership).unwrap();
+        assert!(!request.request.is_replayable_mutation());
+        let wire = request.to_proto().unwrap();
+        assert!(matches!(
+            wire.request,
+            Some(p::request_envelope::Request::ObserveOwnership(_))
+        ));
+        assert_eq!(
+            w::RequestEnvelope::from_proto(wire).unwrap().request,
+            request.request
+        );
+    }
+}
+
 macro_rules! enumeration {
     ($rust:ty, $proto:ty, {$($variant:ident),+ $(,)?}) => {
         impl WireMessage for $rust {
@@ -437,6 +568,7 @@ impl WireMessage for w::RequestEnvelope {
         use p::request_envelope::Request as P;
         use w::Request as W;
         let request = match &self.request {
+            W::ObserveOwnership => P::ObserveOwnership(p::ObserveOwnership {}),
             W::DiscoverPolicy => P::DiscoverPolicy(p::DiscoverPolicy {}),
             W::Attach {
                 supervisor_instance_id,
@@ -521,6 +653,7 @@ impl WireMessage for w::RequestEnvelope {
         use w::Request as W;
         let mut expires = None;
         let request = match required(v.request)? {
+            P::ObserveOwnership(_) => W::ObserveOwnership,
             P::DiscoverPolicy(_) => W::DiscoverPolicy,
             P::Attach(v) => W::Attach {
                 supervisor_instance_id: parse(&v.supervisor_instance_id)?,
@@ -593,6 +726,7 @@ impl WireMessage for w::ResponseEnvelope {
         use p::response_envelope::Response as P;
         use w::Response as W;
         let response = match &self.response {
+            W::OwnershipInventory { inventory } => P::OwnershipInventory(inventory.to_proto()?),
             W::ImagePolicy { yaml, invalid } => P::ImagePolicy(p::ImagePolicy {
                 yaml: yaml.clone(),
                 invalid: *invalid,
@@ -668,6 +802,9 @@ impl WireMessage for w::ResponseEnvelope {
         use p::response_envelope::Response as P;
         use w::Response as W;
         let response = match required(v.response)? {
+            P::OwnershipInventory(v) => W::OwnershipInventory {
+                inventory: Box::new(w::OwnershipInventoryWire::from_proto(v)?),
+            },
             P::ImagePolicy(v) => W::ImagePolicy {
                 yaml: v.yaml,
                 invalid: v.invalid,
@@ -868,5 +1005,143 @@ mod tests {
         let bytes = encode(&request).unwrap();
         let decoded: w::RequestEnvelope = decode(&bytes).unwrap();
         assert_eq!(decoded, request);
+    }
+}
+
+impl WireMessage for w::OwnershipProcessWire {
+    type Proto = p::OwnershipProcess;
+    fn to_proto(&self) -> Result<Self::Proto, FrameError> {
+        Ok(p::OwnershipProcess {
+            kernel_boot_id: self.kernel_boot_id.clone(),
+            pid: self.pid,
+            starttime_ticks: self.starttime_ticks,
+            pid_namespace_inode: self.pid_namespace_inode,
+            net_namespace_inode: self.net_namespace_inode,
+            executable_digest: self.executable_digest.to_vec(),
+        })
+    }
+    fn from_proto(v: Self::Proto) -> Result<Self, FrameError> {
+        let boot = parse::<uuid::Uuid>(&v.kernel_boot_id)?;
+        if boot.is_nil()
+            || boot.to_string() != v.kernel_boot_id
+            || v.pid == 0
+            || v.starttime_ticks == 0
+            || v.pid_namespace_inode == 0
+            || v.net_namespace_inode == 0
+        {
+            return Err(invalid("invalid ownership process identity"));
+        }
+        Ok(Self {
+            kernel_boot_id: v.kernel_boot_id,
+            pid: v.pid,
+            starttime_ticks: v.starttime_ticks,
+            pid_namespace_inode: v.pid_namespace_inode,
+            net_namespace_inode: v.net_namespace_inode,
+            executable_digest: v
+                .executable_digest
+                .try_into()
+                .map_err(|_| invalid("invalid executable digest"))?,
+        })
+    }
+}
+impl WireMessage for w::OwnershipSocketWire {
+    type Proto = p::OwnershipSocket;
+    fn to_proto(&self) -> Result<Self::Proto, FrameError> {
+        Ok(p::OwnershipSocket {
+            inode: self.inode,
+            protocol: self.protocol.clone(),
+            local: self.local.to_string(),
+            remote: self.remote.to_string(),
+            owners: self
+                .owners
+                .iter()
+                .map(WireMessage::to_proto)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    fn from_proto(v: Self::Proto) -> Result<Self, FrameError> {
+        if v.inode == 0
+            || !matches!(v.protocol.as_str(), "tcp" | "tcp6" | "udp" | "udp6")
+            || v.owners.is_empty()
+            || v.owners.len() > 4096
+        {
+            return Err(invalid("invalid ownership socket"));
+        }
+        Ok(Self {
+            inode: v.inode,
+            protocol: v.protocol,
+            local: parse(&v.local)?,
+            remote: parse(&v.remote)?,
+            owners: v
+                .owners
+                .into_iter()
+                .map(w::OwnershipProcessWire::from_proto)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+impl WireMessage for w::OwnershipInventoryWire {
+    type Proto = p::OwnershipInventory;
+    fn to_proto(&self) -> Result<Self::Proto, FrameError> {
+        Ok(p::OwnershipInventory {
+            generation: self.generation.clone(),
+            process_id: self.process_id.clone(),
+            installed_policy: Some(self.installed_policy.to_proto()?),
+            processes: self
+                .processes
+                .iter()
+                .map(WireMessage::to_proto)
+                .collect::<Result<_, _>>()?,
+            sockets: self
+                .sockets
+                .iter()
+                .map(WireMessage::to_proto)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    fn from_proto(v: Self::Proto) -> Result<Self, FrameError> {
+        if v.generation.is_empty()
+            || v.process_id.is_empty()
+            || v.processes.is_empty()
+            || v.processes.len() > 4096
+            || v.sockets.len() > 20000
+        {
+            return Err(invalid("invalid ownership inventory bounds"));
+        }
+        let result = Self {
+            generation: v.generation,
+            process_id: v.process_id,
+            installed_policy: Box::new(w::SandboxPolicyWire::from_proto(required(
+                v.installed_policy,
+            )?)?),
+            processes: v
+                .processes
+                .into_iter()
+                .map(w::OwnershipProcessWire::from_proto)
+                .collect::<Result<_, _>>()?,
+            sockets: v
+                .sockets
+                .into_iter()
+                .map(w::OwnershipSocketWire::from_proto)
+                .collect::<Result<_, _>>()?,
+        };
+        let mut pids = std::collections::HashSet::new();
+        for process in &result.processes {
+            if !pids.insert(process.pid) {
+                return Err(invalid("duplicate ownership process"));
+            }
+        }
+        let mut sockets = std::collections::HashSet::new();
+        for socket in &result.sockets {
+            if !sockets.insert((&socket.protocol, socket.inode, socket.local, socket.remote))
+                || socket
+                    .owners
+                    .iter()
+                    .any(|owner| !result.processes.contains(owner))
+            {
+                return Err(invalid("invalid ownership socket join"));
+            }
+        }
+        Ok(result)
     }
 }

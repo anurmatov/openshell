@@ -595,6 +595,13 @@ pub struct RunningBoundary {
 }
 
 impl RunningBoundary {
+    /// One bounded authenticated read, without recovery/retry or lifecycle effects.
+    /// The caller still has to qualify placement, installed policy and freshness.
+    pub async fn observe_ownership(
+        &self,
+    ) -> Result<crate::boundary_protocol::OwnershipInventoryWire, BackendError> {
+        self.process.observe_ownership().await
+    }
     pub fn agent(&self) -> Arc<BoundaryProcess> {
         self.process.clone()
     }
@@ -624,6 +631,33 @@ pub struct BoundaryProcess {
 }
 
 impl BoundaryProcess {
+    pub async fn observe_ownership(
+        &self,
+    ) -> Result<crate::boundary_protocol::OwnershipInventoryWire, BackendError> {
+        let request = BoundaryClient::prepare_request(Request::ObserveOwnership)?;
+        let (_, response) = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.client.open_exchange_envelope(&request),
+        )
+        .await
+        .map_err(|_| BackendError::Unavailable("ownership inventory timed out".into()))??;
+        let Response::OwnershipInventory { inventory } = response else {
+            return Err(unexpected_response("ownership_inventory", &response));
+        };
+        let installed_policy_matches = self.client.attach_request.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref().is_some_and(|attached| matches!(&attached.request,
+                Request::Attach { policy, .. } if policy.as_ref() == inventory.installed_policy.as_ref()));
+        if inventory.process_id != self.process_id
+            || inventory.generation != self.client.runtime_descriptor.generation
+            || !installed_policy_matches
+        {
+            return Err(BackendError::Unavailable(
+                "ownership process, generation or installed policy replaced".into(),
+            ));
+        }
+        Ok(*inventory)
+    }
     pub async fn attach(&self) -> Result<ProcessAttachment, BackendError> {
         open_process_attachment(self.client.clone(), self.process_id.clone()).await
     }
@@ -2804,6 +2838,10 @@ mod tests {
                     match encode_frame(&ResponseEnvelope {
                         request_id: envelope.request_id,
                         response: match envelope.request {
+                            Request::ObserveOwnership => Response::Error {
+                                kind: crate::boundary_protocol::BoundaryErrorKind::Unavailable,
+                                message: "synthetic ownership source unavailable".to_string(),
+                            },
                             Request::DiscoverPolicy => Response::ImagePolicy {
                                 yaml: None,
                                 invalid: false,
@@ -2985,6 +3023,72 @@ mod tests {
             assert!(matches!(
                 client.mediation_session().await,
                 Err(BackendError::Denied(_))
+            ));
+            assert_eq!(requests.load(Ordering::Acquire), expected_requests);
+            assert!(client.mediation.lock().await.is_none());
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ownership_inventory_actual_rpc_refusal_is_not_retried() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = TestGrpcBoundary {
+            wait_for_half_close: false,
+            expected_token: "a".repeat(32),
+            requests: requests.clone(),
+            mediation_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            mediation_ready: false,
+            provider_environment_generation: 0,
+            confirmation: test_confirmation(),
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tonic::transport::Server::builder()
+                .add_service(IsolationBackendServer::new(TestIsolationBackend::default()))
+                .add_service(SandboxProtocolServer::new(service))
+                .serve_with_incoming(tokio_stream::iter([Ok::<_, std::io::Error>(stream)]))
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = Arc::new(BoundaryClient::new(
+            tls_runtime_descriptor(address, test_certificate().client_tls),
+            test_bearer(&"a".repeat(32)),
+        ));
+        client
+            .open_boundary(
+                channel.clone(),
+                &BoundaryCredential::capture(&client.sandbox_bearer).unwrap(),
+            )
+            .await
+            .unwrap();
+        *client.grpc_channel.lock().await = Some(CachedGrpcChannel {
+            credential_epoch: openshell_core::jwt::CredentialEpoch::new(1).expect("test epoch"),
+            bearer_fingerprint: BoundaryCredential::capture(&client.sandbox_bearer)
+                .expect("test bearer")
+                .fingerprint,
+            generation: 1,
+            channel,
+            transport: Arc::default(),
+        });
+        // Each explicit read sends one request, with no automatic retry.
+        for expected_requests in 1..=2 {
+            assert!(matches!(
+                BoundaryProcess {
+                    exec: false,
+                    client: client.clone(),
+                    process_id: "test-generation:main:0".into()
+                }
+                .observe_ownership()
+                .await,
+                Err(BackendError::Unavailable(_))
             ));
             assert_eq!(requests.load(Ordering::Acquire), expected_requests);
             assert!(client.mediation.lock().await.is_none());

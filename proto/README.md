@@ -210,6 +210,18 @@ Trusted observations, terminal driver journals, curated SDK conformance and
 remaining source oracles are incomplete, so neither ownership capability is
 advertised; namespace provenance is not installed-runtime or broker-drain proof.
 
+The typed Sandbox Protocol now carries a read-only `ObserveOwnership` operation
+through the existing authenticated exchange and native leaf. It has no PID/path
+selector or lifecycle effects and never retries. The leaf retains a launch birth,
+namespace and executable anchor, performs two bounded stable namespace scans,
+and rechecks current supervisor, running process and installed policy before
+returning facts under the existing 1 MiB control ceiling. Partial reads, races,
+missing owners and overflow refuse rather than return truncated/empty evidence.
+The client also checks the exact generation, main process and attached policy.
+This is not yet qualified producer emission, a usable gateway snapshot or a
+closed terminal journal; those connected paths and full package acceptance
+remain incomplete, with capabilities withheld and broker barriers unqualified.
+
 
 The additive observation messages and GetSandboxOwnershipSnapshot RPC now have
 the issue #3 wire field assignments and generated clients.
